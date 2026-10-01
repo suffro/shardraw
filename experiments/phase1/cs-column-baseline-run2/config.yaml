@@ -1,0 +1,27 @@
+model:
+  repository: HuggingFaceTB/SmolLM2-135M-Instruct
+  revision: 12fd25f77366fa6b3b4b768ec3050bf629380bac
+  dtype: auto
+  device: cuda
+numerics:
+  accumulation_unit_roundoff: 2.384185791015625e-07
+paging:
+  page_widths:
+  - 8
+  - 16
+  - 32
+  - 64
+schedulers:
+- sequential
+- largest_residual
+- bound_per_byte
+benchmark:
+  dataset:
+    repository: Salesforce/wikitext
+    revision: b08601e04326c79dfdd32d625aee71d232d685c3
+    file: wikitext-2-raw-v1/test-00000-of-00001.parquet
+    text_column: text
+  num_prompts: 1000
+  min_prompt_tokens: 8
+  max_prompt_tokens: 128
+  seed: 0

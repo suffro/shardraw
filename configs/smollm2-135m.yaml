@@ -1,0 +1,29 @@
+# AWPMI Phase 1 — adaptive LM head on SmolLM2-135M-Instruct.
+
+model:
+  repository: HuggingFaceTB/SmolLM2-135M-Instruct
+  revision: 12fd25f77366fa6b3b4b768ec3050bf629380bac
+  dtype: auto          # BF16 if the device supports it, otherwise FP32
+  device: cuda         # falls back to cpu when CUDA is unavailable
+
+numerics:
+  # Relative error bound per reference-accumulator operation: 2^-22, i.e. 4x the
+  # IEEE binary32 unit roundoff (see awpmi/bounds/residual.py). Validated
+  # empirically by the reference-envelope check in every benchmark run.
+  accumulation_unit_roundoff: 2.384185791015625e-07
+
+paging:
+  page_widths: [8, 16, 32, 64]
+
+schedulers: [sequential, largest_residual, bound_per_byte]
+
+benchmark:
+  dataset:
+    repository: Salesforce/wikitext
+    revision: b08601e04326c79dfdd32d625aee71d232d685c3
+    file: wikitext-2-raw-v1/test-00000-of-00001.parquet
+    text_column: text
+  num_prompts: 1000
+  min_prompt_tokens: 8
+  max_prompt_tokens: 128
+  seed: 0

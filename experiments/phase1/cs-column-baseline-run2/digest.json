@@ -1,0 +1,7 @@
+{
+  "records_sha256": "60d1d8bdefde9a5ba0f8a7af610ae88f1b1cd54e457de82025c6c1292ba3bbc3",
+  "validation_sha256": "2ca505151224daf3473fab04566ac0a16ef90bdb8ebae806b01456ae9d0dd9d4",
+  "excluded_fields": [
+    "elapsed_ms"
+  ]
+}

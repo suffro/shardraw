@@ -1,0 +1,54 @@
+{
+  "width=8": {
+    "inputs": 1000,
+    "pages_total": 72,
+    "cs_early_certification_ceiling": 0.562,
+    "cs_greedy_mean_materialized_fraction": 0.9818055555555554,
+    "cs_greedy_max_pages_skipped": 9,
+    "ideal_early_certification_ceiling": 1.0,
+    "ideal_greedy_mean_materialized_fraction": 0.8303611111111111,
+    "exact_top2_gap_median": 0.8376623336225748,
+    "winner_cs_radius_over_gap_median": 106.1316347627318,
+    "winner_absolute_page_mass_over_gap_median": 39.80142617357805,
+    "winner_cs_looseness_median": 2.5909860973627445
+  },
+  "width=16": {
+    "inputs": 1000,
+    "pages_total": 36,
+    "cs_early_certification_ceiling": 0.206,
+    "cs_greedy_mean_materialized_fraction": 0.9925555555555554,
+    "cs_greedy_max_pages_skipped": 4,
+    "ideal_early_certification_ceiling": 0.988,
+    "ideal_greedy_mean_materialized_fraction": 0.8418333333333333,
+    "exact_top2_gap_median": 0.8376623336225748,
+    "winner_cs_radius_over_gap_median": 115.30314461465252,
+    "winner_absolute_page_mass_over_gap_median": 34.133175170948356,
+    "winner_cs_looseness_median": 3.329633274444733
+  },
+  "width=32": {
+    "inputs": 1000,
+    "pages_total": 18,
+    "cs_early_certification_ceiling": 0.024,
+    "cs_greedy_mean_materialized_fraction": 0.9986666666666665,
+    "cs_greedy_max_pages_skipped": 1,
+    "ideal_early_certification_ceiling": 0.881,
+    "ideal_greedy_mean_materialized_fraction": 0.8750000000000001,
+    "exact_top2_gap_median": 0.8376623336225748,
+    "winner_cs_radius_over_gap_median": 120.71745223351105,
+    "winner_absolute_page_mass_over_gap_median": 29.958956383638547,
+    "winner_cs_looseness_median": 4.039835695954691
+  },
+  "width=64": {
+    "inputs": 1000,
+    "pages_total": 9,
+    "cs_early_certification_ceiling": 0.0,
+    "cs_greedy_mean_materialized_fraction": 1.0,
+    "cs_greedy_max_pages_skipped": 0,
+    "ideal_early_certification_ceiling": 0.521,
+    "ideal_greedy_mean_materialized_fraction": 0.9202222222222223,
+    "exact_top2_gap_median": 0.8376623336225748,
+    "winner_cs_radius_over_gap_median": 126.94098811017096,
+    "winner_absolute_page_mass_over_gap_median": 25.830503444440723,
+    "winner_cs_looseness_median": 4.781682641815677
+  }
+}
