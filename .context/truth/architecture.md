@@ -26,6 +26,15 @@ Implemented so far:
   are propagated through the reference's own operations under the faithful rounding
   model; a scale-free pairwise certificate works through the final RMSNorm. The masked
   LM-head fallback is the default (decision 0005).
+- **Phase 3**: physical selective materialization (decision 0006). A storage core that knows no
+  model (`awpmi.storage`, `awpmi.streaming`, `awpmi.materialization`) reads only the requested
+  rows of segments from files (direct I/O) or host memory, moves only their bytes to the
+  device, caches pages under a budget, and counts every byte, cross-checked against the OS.
+  The Phase 1C LM head runs on it unchanged (its segments in a pack, its exact rows read from
+  the published checkpoint), bitwise equal to the resident runtime. A model-agnostic
+  mixture-of-experts adapter serves transformers' experts modules from the same backend,
+  bitwise equal to the resident model (7 architectures in tests, Granite 3.1 1B-A400M in the
+  benchmark).
 
 ## Major components (`src/awpmi/`)
 
@@ -48,9 +57,14 @@ Implemented so far:
 | `certificate.py` | `Certificate.check`: CERTIFIED iff lower[w] > max_{j≠w} upper[j] with w = argmax(partial), otherwise UNKNOWN. `TieBreak.LOWEST_INDEX` (decision 0003) also accepts equality against higher-index rows. `certify_columns` and `contenders` are batched forms used by the oracle (row elimination). |
 | `decomposition/` | Phase 1B: `RefinementDecomposition` (W = base + refinement levels + exact remainder, per-row int-b levels with float32 scales, exactness checked with TwoSum, byte accounting). Phase 1C adds `packing.py` (per-row little-endian bitstream of biased codes, `CodeLayout.unpack`) and `accounting.py` (4 KiB block accounting, shared with the oracle). |
 | `oracle/refinement.py` | Phase 1B diagnostic simulator: `RefinementBatch` (per-state intervals for the `realistic`, `abs_mass` and `ideal` bound tiers), `simulate` (global or row-selective refinement). |
-| `stores/refinement.py` | Phase 1C: `PackedRefinementStore`, packed levels, scales, resident remainder norms and the original rows. `read_level` / `read_exact` / `read_fallback` are the only way to weight values; each read is logged with its rows and bytes (`bytes_read`, `reads`). |
+| `stores/refinement.py` | Phase 1C: `PackedRefinementStore`, packed levels, scales, resident remainder norms and the original rows. `read_level` / `read_exact` / `read_fallback` are the only way to weight values; each read is logged with its rows and bytes (`bytes_read`, `reads`). Phase 3: it reads through a `MaterializationBackend`: `from_decomposition` (segments resident on the weight's device, Phase 1C) or `from_pack` (a refinement pack on storage); a level row is one record, the packed codes then the float32 scale (`level_records`); `write_refinement_pack` writes the pack, its exact rows referring to the checkpoint tensor. |
+| `storage/` | Phase 3 storage core (no model, no certificate). `layout`: `Segment` (fixed-size rows at an offset of a file; a safetensors tensor is one as it is), safetensors headers, typed row views. `fileio`: `PositionedFile` (thread-safe positioned reads; direct = `FILE_FLAG_NO_BUFFERING` / `O_DIRECT`), the OS's per-process read counters, process memory, aligned (pinned) host buffers. `store`: `plan_reads` (runs of consecutive rows → 4 KiB-aligned extents, merged when their blocks touch), `IOStats`, `PageStore` with `InMemoryPageStore` and `FileBackedPageStore` (reads the planned extents only, with 8 worker threads). `cache`: `PageCache` (device pages under a byte budget, pinned entries, admission freeze) with `LRUPolicy` and `HotnessPolicy`. `pack`: `PackWriter`, `open_pack` (manifest with files, segments and sha256; segments re-hashed with direct reads), `Pack.store` / `Pack.load` (the host-memory tier), `SourceFile` (a published checkpoint file in the Hugging Face cache). |
+| `streaming/streamer.py` | Phase 3 transfer layer: `PageStreamer`. Pinned, page-aligned staging slots (two: double buffering), a CUDA copy stream, per-slot events, and the compute stream waiting on a ready event. A file-backed fetch reads its plan in slot-sized pieces and copies only the requested rows' bytes to the device; a host-memory fetch gathers into a slot. `prefetch` returns a `Ticket` (consumed and wasted bytes counted). |
+| `materialization/` | Phase 3: `MaterializationBackend` (`materialize(segment, rows)` → device rows: a store in memory on the compute device answers directly; otherwise the cache, then the streamer; every request counted; `report` gathers the storage, transfer and cache counters), `WeightStore` (typed rows of named weights), `ExpertStore` / `ExpertGroup` (a layer's expert-sliced segments; `load`, and `fill` into full-shape buffers). |
+| `models/moe.py` | Phase 3 MoE adapter, model-agnostic over the experts convention of transformers 5: `find_expert_modules` (a module with `num_experts` and a ≥3-D parameter whose first dimension is that count), `write_expert_pack` (refers to checkpoint tensors with the same bytes, copies the rest), `StreamedExperts` (full-shape slot buffers, a pre-hook that fills the routed experts before the module's own forward; poison mode; `all_experts` for dense layer streaming), `record_routing`. |
+| `cli.py` | `awpmi pack lm-head` and `awpmi pack experts` (roadmap §3.2). |
 | `stores/suffix.py` | Phase 2: `MLPStore`, neuron-major pages of the last MLP (gate row, up row, down column of each neuron, one contiguous run each), served only for the stage's adaptive roles, every read logged; resident metadata: down column norms, down row norms (L2, L∞), up row norms. |
-| `refinement_head.py` | Phase 1C runtime `RefinementLMHead.run`: binary32 coarse pass over every row → certificate → elimination → float64 refinement of the contenders (the oracle's realistic arithmetic) → exact rows → certificate or fallback (`FallbackMode.MASKED`, the default since decision 0005, self-tested and guarded, else `FULL`). Phase 2: `run_enclosure` runs the same states on an `Enclosure` of h (input spread \|L\|·ρ added to every radius, no fallback, optional row limits), and `HeldReads` lets one token's passes share their reads. Optional `RunTrace` and `StageTimer`. |
+| `refinement_head.py` | Phase 1C runtime `RefinementLMHead.run`: binary32 coarse pass over every row → certificate → elimination → float64 refinement of the contenders (the oracle's realistic arithmetic) → exact rows → certificate or fallback (`FallbackMode.MASKED`, the default since decision 0005, self-tested and guarded, else `FULL`). Phase 2: `run_enclosure` runs the same states on an `Enclosure` of h (input spread \|L\|·ρ added to every radius, no fallback, optional row limits), and `HeldReads` lets one token's passes share their reads. Optional `RunTrace` and `StageTimer` (Phase 3 adds `*:read` stages around every store read; timing only). |
 | `suffix_runtime.py` | Phase 2 runtime `AdaptiveSuffixRuntime.run` for a `SuffixStage` (lm_head, down, mlp): read a budgeted share of the suffix's neuron pages (largest bound contribution first) → enclosures through the suffix → LM-head pass on the enclosure → pairwise certificate → else exact recomputation of the suffix (the reference's operations and shapes, bitwise) and the Phase 1C LM head on the exact h, reusing the reads. Experimental rounding models report `would_certify` only. |
 | `schedulers/` | Deterministic page ordering: `sequential`, `largest_residual`, `bound_per_byte`. They see metadata and state, never page values. |
 | `executor.py` | `AdaptiveLMHead.run`: the certify → schedule → materialize → refine loop, plus the exact fallback. |
@@ -76,6 +90,15 @@ exact prefix of each stage, the depth-0 LM head, then every stage × budget × r
 × row-limit policy, with enclosure, pairwise-bound, exact-suffix, byte and single-read
 checks), `benchmarks/suffix_report.py` (curves, bound provenance, gate, per-stage decision),
 `configs/phase2-suffix.yaml` and `experiments/phase2/<run>/`.
+Phase 3 adds `benchmarks/storage_runtime.py` (the Phase 1C LM head on a tier: the full BF16
+head from the drive or from host memory, the resident runtime, the runtime on the drive, on
+host memory and with a cached base level; parity with the resident runtime and the Phase 1C
+records, storage audits, OS cross-check), `benchmarks/storage_report.py` (gates A and B),
+`benchmarks/moe_runtime.py` (Granite MoE: resident reference, then experts from the drive
+under several cache budgets and policies, every step compared bit for bit),
+`benchmarks/moe_report.py` (gate C, routing statistics), `configs/phase3-storage.yaml`,
+`configs/phase3-moe.yaml`, `experiments/phase3/<run>/`, and packs under `packs/` (gitignored,
+rebuilt by `awpmi pack`).
 
 ## Data flow (one input)
 
@@ -117,6 +140,20 @@ Phase 2 runtime (`AdaptiveSuffixRuntime.run`), stages down and mlp:
    `RefinementLMHead.run(h, held=…)`: Phase 1C on the exact h, sharing the first pass's
    reads.
 
+Phase 3, the Phase 1C runtime on storage (`PackedRefinementStore.from_pack`): every
+`read_level` / `read_exact` / `read_fallback` becomes `MaterializationBackend.materialize`:
+
+1. the page cache, if any, serves what it holds (e.g. a pinned base level);
+2. the store plans the read: runs of consecutive rows → 4 KiB-aligned extents;
+3. the streamer reads the extents into a pinned staging slot (8 threads of positioned reads,
+   direct I/O), gathers the requested rows and copies only them to the device on the copy
+   stream; the next piece's reads overlap the previous piece's copy;
+4. the compute stream waits for the copy; the runtime computes exactly as before.
+
+Phase 3, a MoE model (`StreamedExperts`): the router runs (resident); the experts module's
+pre-hook takes `top_k_index`, materializes those experts of that layer (cache, then drive),
+writes them into the full-shape slot buffers, and the module's own forward runs.
+
 ## Important constraints
 
 - The certificate bounds the **floating-point reference logits** (after accumulation
@@ -145,3 +182,17 @@ Phase 2 runtime (`AdaptiveSuffixRuntime.run`), stages down and mlp:
 - The adaptive suffix starts after the last layer's attention, so the KV cache is written by
   the exact prefix and stays the reference's (roadmap §2.8, Mode A; tested over cached
   greedy generations).
+- Layering (decision 0006, enforced by `tests/test_layering.py`): the storage core
+  (`storage`, `streaming`, `materialization`) names no model, tensor or router and imports no
+  layer above it; the certification layer (`bounds`, `certificate`, `refinement_head`) imports
+  no storage. Where bytes come from never changes what is computed: storage-backed runs are
+  checked bit for bit against resident ones.
+- A file-backed store reads the planned extents and nothing else: a block is read only if it
+  holds a requested byte, and only requested rows reach the device. Physical bytes are what
+  the reads returned, and they must equal the OS's own per-process counters.
+- On NTFS, direct reads of a file that has an active OS cache map are several times slower
+  (decision 0006). Packs are verified with direct reads; benchmarks never mix buffered and
+  direct access to one file, and wait for cached handles to close after setup.
+- The MoE adapter's slot buffers have the experts' full shape (E × expert bytes per layer and
+  buffer set): fine for small and medium MoE models, not for DeepSeek-class layers (decision
+  0006).

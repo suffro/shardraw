@@ -1,0 +1,195 @@
+{
+  "directory": "packs/smollm2-135m-instruct-lm-head-q6+q4",
+  "built_now": false,
+  "open_and_verify_s": 0.28677499992772937,
+  "levels_match_phase1c": true,
+  "manifest": {
+    "format": "awpmi-pack",
+    "format_version": 1,
+    "kind": "refinement-lm-head",
+    "files": {
+      "pack": {
+        "path": "pack.safetensors",
+        "bytes": 36569640,
+        "sha256": "5ea72018da0451040bb1adfd4f9f66622cd0e9fe167d8863277f1676041395a5"
+      },
+      "source": {
+        "source": {
+          "repository": "HuggingFaceTB/SmolLM2-135M-Instruct",
+          "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+          "filename": "model.safetensors"
+        },
+        "bytes": 269060552,
+        "sha256": "5af571cbf074e6d21a03528d2330792e532ca608f24ac70a143f6b369968ab8c"
+      }
+    },
+    "segments": {
+      "exact": {
+        "file": "source",
+        "offset": 30536,
+        "rows": 49152,
+        "row_bytes": 1152,
+        "dtype": "BF16",
+        "row_shape": [
+          576
+        ],
+        "sha256": "4af1341b29fe1dc67f81c951a4d4e84d99213e5fce7c853f18cd710f9bf95445"
+      },
+      "level0": {
+        "file": "pack",
+        "offset": 786984,
+        "rows": 49152,
+        "row_bytes": 436,
+        "dtype": "U8",
+        "row_shape": [
+          436
+        ],
+        "sha256": "e925917dbe9e4869180d609d2efc208f3621dde0d8e0a18ad006e711abee7b49"
+      },
+      "level1": {
+        "file": "pack",
+        "offset": 22217256,
+        "rows": 49152,
+        "row_bytes": 292,
+        "dtype": "U8",
+        "row_shape": [
+          292
+        ],
+        "sha256": "eb61c814faf0f88ad48e09f54b7e4a84b5a4937cef95d5e3f95124d96f50fdb6"
+      },
+      "remainder0.l2": {
+        "file": "pack",
+        "offset": 552,
+        "rows": 49152,
+        "row_bytes": 4,
+        "dtype": "F32",
+        "row_shape": [],
+        "sha256": "531e93c1bb8c5c7b703dfe56c1fbe02fe36bf5da80973881bab2ad87d4f00b8e"
+      },
+      "remainder0.linf": {
+        "file": "pack",
+        "offset": 197160,
+        "rows": 49152,
+        "row_bytes": 4,
+        "dtype": "F32",
+        "row_shape": [],
+        "sha256": "5a9ebdbfa589c66a918086870230d8de03456a2b18bd0c35752e8f175d5114bb"
+      },
+      "remainder1.l2": {
+        "file": "pack",
+        "offset": 393768,
+        "rows": 49152,
+        "row_bytes": 4,
+        "dtype": "F32",
+        "row_shape": [],
+        "sha256": "9099026d169b4a60868b0e6aa98b6f37a2f58f34f14c67ced59ec941495ca571"
+      },
+      "remainder1.linf": {
+        "file": "pack",
+        "offset": 590376,
+        "rows": 49152,
+        "row_bytes": 4,
+        "dtype": "F32",
+        "row_shape": [],
+        "sha256": "5e6b30c43cd74785c29ed2147a43204ff286a3db0db0c8ed1a3faf89efcc30e0"
+      }
+    },
+    "metadata": {
+      "decomposition": "q6+q4",
+      "layout": {
+        "out_features": 49152,
+        "in_features": 576,
+        "dtype": "BF16",
+        "bits": [
+          6,
+          4
+        ]
+      },
+      "record": {
+        "payload": "bit-packed biased codes, little-endian bitstream",
+        "scale": "float32 little-endian, after the payload"
+      },
+      "levels_sha256": "3e1f2a86a7e55cb551617a6f40dc3d44c88b80e41d018590de1fbcdd1563d2b7",
+      "weight_sha256": "4af1341b29fe1dc67f81c951a4d4e84d99213e5fce7c853f18cd710f9bf95445",
+      "source": {
+        "repository": "HuggingFaceTB/SmolLM2-135M-Instruct",
+        "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac",
+        "filename": "model.safetensors",
+        "tensor": "model.embed_tokens.weight"
+      }
+    },
+    "packing": {
+      "tool": "awpmi pack lm-head",
+      "config": "C:\\Users\\loren\\Documents\\GitHub\\shardraw\\configs\\phase3-storage.yaml"
+    }
+  },
+  "weight_bytes": 56623104,
+  "store_sha256": {
+    "B": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755",
+    "C-direct": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755",
+    "C-host": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755",
+    "C-cached-base": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755"
+  },
+  "store_matches_resident": true,
+  "store_matches_phase1c": true,
+  "masked_fallback_self_test": {
+    "B": {
+      "masked": {
+        "trials": 16,
+        "mismatches": 0
+      },
+      "full": null
+    },
+    "C-direct": {
+      "masked": {
+        "trials": 16,
+        "mismatches": 0
+      },
+      "full": null
+    },
+    "C-host": {
+      "masked": {
+        "trials": 16,
+        "mismatches": 0
+      }
+    },
+    "C-cached-base": {
+      "masked": {
+        "trials": 16,
+        "mismatches": 0
+      }
+    }
+  },
+  "resident_bytes": {
+    "A-direct": {
+      "device": 0,
+      "device_metadata": 0,
+      "host": 33554432
+    },
+    "A-host": {
+      "device": 0,
+      "device_metadata": 0,
+      "host": 90177536
+    },
+    "B": {
+      "device": 93192192,
+      "device_metadata": 786432,
+      "host": 0
+    },
+    "C-direct": {
+      "device": 786432,
+      "device_metadata": 786432,
+      "host": 33554432
+    },
+    "C-host": {
+      "device": 786432,
+      "device_metadata": 786432,
+      "host": 126746624
+    },
+    "C-cached-base": {
+      "device": 22216704,
+      "device_metadata": 786432,
+      "host": 33554432
+    }
+  }
+}

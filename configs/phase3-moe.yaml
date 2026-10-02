@@ -1,0 +1,61 @@
+# AWPMI Phase 3, step 3: the general backend serving a mixture-of-experts model (decision 0006).
+
+model:
+  # The smallest practical open MoE that exercises routing, expert storage, an expert cache and
+  # selective reads: 1.3 B parameters, 24 layers of 32 experts, 8 routed per token. Its experts are
+  # stacked tensors that the transformers loader only renames, so they are read from the
+  # published file itself.
+  repository: ibm-granite/granite-3.1-1b-a400m-instruct
+  revision: 0da7a48b0276d500ce5922fd2b33944091fc6c09
+  dtype: bfloat16
+  source_file: model.safetensors
+
+prompts:
+  # The Phase 1 wikitext prompts, decoded with their tokenizer and re-tokenized for this model.
+  source_run: experiments/phase1/cs-column-baseline-run1
+  num_prompts: 50
+  max_prompt_tokens: 128
+  decode_steps: 12          # greedy tokens after the prompt, with the KV cache
+
+pack:
+  directory: packs/granite-3.1-1b-a400m-instruct-experts
+
+storage:
+  alignment: 4096
+  max_gap: 0
+  workers: 8
+  max_read_bytes: 1048576
+  max_extent_bytes: 8388608
+  slot_bytes: 8388608
+  slots: 2
+
+# The resident model runs first and is the reference of every step (logits compared bit for bit).
+# Then its experts are released and every configuration serves them from the drive, in order;
+# a cache persists across the prompts of its configuration (a serving process) and starts empty.
+# cache_fraction: the expert cache's budget as a fraction of all expert bytes.
+configurations:
+  - {name: stream, cache_fraction: 0.0}
+  - {name: lru-25, cache_fraction: 0.25, policy: lru}
+  - {name: hotness-25, cache_fraction: 0.25, policy: hotness}
+  - {name: lru-50, cache_fraction: 0.5, policy: lru}
+  - {name: hotness-50, cache_fraction: 0.5, policy: hotness}
+  # Dense layer streaming (the roadmap's sequential full streaming): every expert of every layer
+  # read for every forward. Expensive, so on the first prompts only.
+  - {name: all-experts, all_experts: true, num_prompts: 5, decode_steps: 4}
+
+hotness_half_life: 1024     # cache accesses for a page's hotness to halve
+poison_prompts: 3           # the first N prompts of the first configuration fill unrouted slots with NaN
+
+timing:
+  settle_seconds: 3
+  warmup_prompts: 1
+
+# Gate C, fixed before the full run: the same storage and materialization API serves this model.
+gate:
+  # Hard checks on every step of every configuration: logits bit for bit equal to the resident
+  # model's (prefill and every decode step), the same tokens, storage served exactly the routed
+  # experts that the cache did not hold, the device received exactly those bytes, every block read
+  # holds a requested byte, and the OS counters equal the store's reads.
+  # Selectivity: a decode step must read from the drive at most this fraction of the expert bytes
+  # (without a cache; 8 of 32 experts per layer is 0.25).
+  max_decode_drive_fraction_without_cache: 0.30

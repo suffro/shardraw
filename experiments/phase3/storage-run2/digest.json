@@ -1,0 +1,11 @@
+{
+  "pack_sha256": "62343ed58fd83868d627df3f0c397db3eec1d22c9c847b3b5fc690bf600c918a",
+  "reference_sha256": "fc3a870697cfdd8544ee2219c298f1b68f3236b1757a4671716182c63b315673",
+  "validation_sha256": "6e5ba26df9b91cbe69d1bdb6b6779e234888f29b336d4fe3df562e3ae2aa6107",
+  "records_sha256": "01e2c1c364b7af2cf4d41d8b4480785c04b0b7d82a570cab9198c3e663357f71",
+  "ranges_sha256": "80ce1b79397f8b2421cb166b7bafc723ec8fbd21baacdd4ba8561a1f1b46895f",
+  "excluded_fields": [
+    "timings_ms",
+    "system"
+  ]
+}

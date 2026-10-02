@@ -1,0 +1,46 @@
+model:
+  repository: ibm-granite/granite-3.1-1b-a400m-instruct
+  revision: 0da7a48b0276d500ce5922fd2b33944091fc6c09
+  dtype: bfloat16
+  source_file: model.safetensors
+prompts:
+  source_run: experiments/phase1/cs-column-baseline-run1
+  num_prompts: 50
+  max_prompt_tokens: 128
+  decode_steps: 12
+pack:
+  directory: packs/granite-3.1-1b-a400m-instruct-experts
+storage:
+  alignment: 4096
+  max_gap: 0
+  workers: 8
+  max_read_bytes: 1048576
+  max_extent_bytes: 8388608
+  slot_bytes: 8388608
+  slots: 2
+configurations:
+- name: stream
+  cache_fraction: 0.0
+- name: lru-25
+  cache_fraction: 0.25
+  policy: lru
+- name: hotness-25
+  cache_fraction: 0.25
+  policy: hotness
+- name: lru-50
+  cache_fraction: 0.5
+  policy: lru
+- name: hotness-50
+  cache_fraction: 0.5
+  policy: hotness
+- name: all-experts
+  all_experts: true
+  num_prompts: 5
+  decode_steps: 4
+hotness_half_life: 1024
+poison_prompts: 3
+timing:
+  settle_seconds: 3
+  warmup_prompts: 1
+gate:
+  max_decode_drive_fraction_without_cache: 0.3

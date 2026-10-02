@@ -419,6 +419,7 @@ class _Run:
 
     def _coarse_state(self) -> bool:
         payload, scales = self._base()
+        self.timer.mark("0:read")
         layout = self.head._layouts[0]
         if self.enclosure is None:
             coarse_sum = coarse_matvec(payload, layout, self.vector.to(torch.float32), self.head.chunk_rows)
@@ -469,7 +470,9 @@ class _Run:
             self.running_mass[rows] = absolute_mass_upper(base, weights)
             if self.enclosure is not None:
                 self.running_spread[rows] = absolute_mass_upper(base, self.rho)
+        self.timer.mark(f"{state}:refine")
         payload, scales = self._level(state, rows)
+        self.timer.mark(f"{state}:read")
         values = self._level_values(state, payload, scales)
         center = self.running_center[rows] + values @ self.vector64
         mass = self.running_mass[rows] + absolute_mass_upper(values, weights)
@@ -485,7 +488,9 @@ class _Run:
         return center, radius
 
     def _exact_state(self, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self.timer.mark(f"{self.store.exact_state}:exact")
         weight = self._exact(rows)
+        self.timer.mark(f"{self.store.exact_state}:read")
         self.exact_rows, self.exact_weight = rows, weight
         values = weight.to(torch.float64)
         if self.enclosure is None:
@@ -542,6 +547,7 @@ class _Run:
             self.store.out_features, self.store.in_features, dtype=self.store.dtype, device=self.store.device
         )
         weight.index_copy_(0, missing, self.store.read_fallback(missing))
+        self.timer.mark("fallback:read")
         if bool(held.any()):
             rows = held.nonzero().squeeze(1)
             weight.index_copy_(0, rows, cache.gather(rows)[0])

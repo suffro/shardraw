@@ -1,0 +1,11 @@
+{
+  "sequential_read_ms": 6.4112150052096695,
+  "sequential_read_gbps": 3.342622573503781,
+  "random_32_rows_ms": 0.8249000122305006,
+  "random_32_rows_us_per_extent": 26.145800704611744,
+  "random_1024_rows_ms": 9.220334992278367,
+  "random_1024_rows_us_per_extent": 14.066109828037174,
+  "h2d_pinned_ms": 3.3066549978684634,
+  "h2d_pinned_gbps": 6.480951902697557,
+  "repetitions": 20
+}

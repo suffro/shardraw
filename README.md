@@ -36,6 +36,15 @@ rounding model certifies; round-to-nearest-even is recorded as a what-if. It is 
 not save bytes: the reference's own BF16 roundings of activations cap the final
 projection's certificate at 27% of tokens even with every weight read.
 
+**Phase 3 — real selective storage** moves the weights out of memory. A storage core that
+knows no model reads only the requested rows of a weight from files (direct I/O) or host
+memory, moves only those bytes to the GPU through a pinned double-buffered streamer, keeps
+pages in a budgeted cache, and counts every byte against the OS's own counters. The Phase 1C
+LM head runs on it unchanged and bit for bit equal to the resident runtime, its exact rows read
+straight from the published checkpoint. The same backend serves the experts of a
+mixture-of-experts model (Granite 3.1 1B-A400M; seven architectures in tests) bit for bit,
+with only the routed experts read from the drive.
+
 ## Setup
 
 ```bash
@@ -57,6 +66,12 @@ uv run python benchmarks/refinement_runtime_report.py experiments/phase1c/my-run
 uv run python benchmarks/fallback_study.py --output experiments/phase1c/my-study
 uv run python benchmarks/suffix_runtime.py --output experiments/phase2/my-run [--num-prompts 50]
 uv run python benchmarks/suffix_report.py experiments/phase2/my-run [--compare experiments/phase2/other-run]
+uv run awpmi pack lm-head                                       # Phase 3 packs, under packs/
+uv run awpmi pack experts
+uv run python benchmarks/storage_runtime.py --output experiments/phase3/my-run [--num-prompts 50]
+uv run python benchmarks/storage_report.py experiments/phase3/my-run [--compare experiments/phase3/other-run]
+uv run python benchmarks/moe_runtime.py --output experiments/phase3/my-moe-run [--num-prompts 5]
+uv run python benchmarks/moe_report.py experiments/phase3/my-moe-run [--compare experiments/phase3/other-moe-run]
 ```
 
 `run.py` writes raw per-input records, validation records, the prompts, the
@@ -73,6 +88,14 @@ validates it against the reference, and compares its bytes with the Phase 1B ora
 `suffix_runtime.py` runs the Phase 2 adaptive suffix for every stage, budget and rounding
 model, checks every intermediate against the reference, and `suffix_report.py` draws the
 materialization curves and evaluates the gate (`configs/phase2-suffix.yaml`).
+`awpmi pack` writes Phase 3 packs: safetensors files and a manifest with every segment's
+location and hash, referring to the published checkpoint wherever it holds the bytes.
+`storage_runtime.py` runs the Phase 1C LM head against the full BF16 head on the drive and in
+host memory, resident, on the drive and with a cached base level, audits every byte, and
+`storage_report.py` evaluates gates A and B (`configs/phase3-storage.yaml`). `moe_runtime.py`
+serves a MoE model's experts from the drive under several cache budgets and policies, compares
+every decoding step with the resident model bit for bit, and `moe_report.py` evaluates gate C
+(`configs/phase3-moe.yaml`).
 
 ## Layout
 
@@ -80,14 +103,18 @@ materialization curves and evaluates the gate (`configs/phase2-suffix.yaml`).
 src/awpmi/      reference, paging, bounds, state, certificate, schedulers, executor, tracing,
                 decomposition (Phase 1B, packing), oracle (Phase 1B simulator),
                 stores (Phase 1C packed store, Phase 2 MLP store), refinement_head (Phase 1C runtime),
-                bounds/{rounding,enclosure,operators,pairwise} and suffix_runtime (Phase 2)
+                bounds/{rounding,enclosure,operators,pairwise} and suffix_runtime (Phase 2),
+                storage, streaming, materialization, models/moe and cli (Phase 3)
 tests/          bound soundness, pages, certificate and ties, reference parity, fallback parity,
                 decomposition exactness, refinement oracle, packing, coarse bounds, runtime,
-                rounding models, operator bounds, enclosure LM head, adaptive suffix
+                rounding models, operator bounds, enclosure LM head, adaptive suffix,
+                storage (no hidden reads), streaming and caches, runtime on storage, MoE experts, layering
 benchmarks/     run.py, report.py, prompts.py, oracle.py, refinement_oracle.py, refinement_report.py,
                 refinement_runtime.py, refinement_runtime_report.py, fallback_study.py,
-                suffix_runtime.py, suffix_report.py
+                suffix_runtime.py, suffix_report.py, storage_runtime.py, storage_report.py,
+                moe_runtime.py, moe_report.py
 configs/        smollm2-135m.yaml (pinned model and dataset revisions), phase1b-refinement.yaml,
-                phase1c-runtime.yaml, phase2-suffix.yaml
+                phase1c-runtime.yaml, phase2-suffix.yaml, phase3-storage.yaml, phase3-moe.yaml
 experiments/    raw results per phase and run
+packs/          Phase 3 packs (gitignored; rebuilt by `awpmi pack`)
 ```

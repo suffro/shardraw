@@ -1,0 +1,78 @@
+# AWPMI Phase 3, step 2: the Phase 1C LM head on physical storage (decision 0006).
+
+# The Phase 1A run whose prompts, model and reference numerics are reused.
+source_run: experiments/phase1/cs-column-baseline-run1
+# The Phase 1C run whose records the resident configuration must reproduce, field by field.
+phase1c_run: experiments/phase1c/runtime-run1
+
+decomposition: q6+q4
+tie_break: lowest_index
+
+pack:
+  # Built on first use (gitignored), then re-opened with every segment re-hashed.
+  directory: packs/smollm2-135m-instruct-lm-head-q6+q4
+  # The exact rows are not copied: they are this tensor of the published checkpoint (the LM head
+  # is tied to the embedding), checked byte for byte against the model's LM-head weight.
+  source_file: model.safetensors
+  source_tensor: model.embed_tokens.weight
+
+runtime:
+  coarse_unit_roundoff: 2.384185791015625e-07  # 2^-22, as in Phase 1C
+  chunk_rows: 8192
+  masked_self_test_trials: 16
+
+storage:
+  alignment: 4096          # I/O unit: the drive's physical sector, and the block of decisions 0003-0004
+  max_gap: 0               # never read a block for its own sake: merge only runs whose blocks touch
+  workers: 8               # positioned reads in flight (prototype: 8 threads reach 71k random 4 KiB reads/s)
+  max_read_bytes: 1048576  # one read call moves at most 1 MiB
+  max_extent_bytes: 8388608
+  slot_bytes: 8388608      # pinned staging slot (two of them: double buffering)
+  slots: 2
+
+# Every configuration runs on every prompt. Bytes are per token; nothing is cached across tokens
+# unless a configuration says so. Tiers: direct = the pack's files read with direct I/O (every read
+# reaches the drive); host = the pack read once into pinned host memory (a RAM tier).
+# Buffered reads through the OS page cache are supported but not benchmarked: on NTFS a file with
+# cached pages makes direct reads of it several times slower (decision 0006), and the OS cache is
+# shared state that one configuration would leave behind for the next.
+configurations:
+  # A: the full BF16 LM head moved for every token, then the reference GEMV.
+  - {name: A-direct, kind: full_head, tier: direct}
+  - {name: A-host, kind: full_head, tier: host}
+  # B: the resident Phase 1C runtime (every segment in device memory).
+  - {name: B, kind: resident, fallbacks: [masked, full]}
+  # C: the same runtime reading its segments from a tier.
+  - {name: C-direct, kind: file, tier: direct, fallbacks: [masked, full]}
+  - {name: C-host, kind: file, tier: host, fallbacks: [masked]}
+  # C with the int6 base level kept resident on the device (a page-cache policy): per token only
+  # refinement rows and exact rows are read.
+  - {name: C-cached-base, kind: file, tier: direct, cache_base: true, fallbacks: [masked]}
+
+# The configuration the gate is evaluated on: masked is the default fallback (decision 0005).
+primary: {configuration: C-direct, fallback: masked}
+baseline: A-direct
+
+timing:
+  warmup_prompts: 5
+  settle_seconds: 3        # after setup: lets the OS finish closing cached file objects (decision 0006)
+  synchronize: true        # device synchronized at every stage boundary
+  record_ranges_prompts: 20  # full read-range traces for the first N prompts of the primary configuration
+
+# Fixed before the full run (decision 0006). Fractions are bytes per token over the BF16 LM-head bytes.
+gate:
+  # Gate A (physical selective materialization): hard checks on every C run, all must hold:
+  #   correctness as Phase 1C (0 certified / fallback mismatches, bitwise full fallback, masked
+  #   fallback bitwise on the survivors, 0 envelope and coarse-arithmetic violations);
+  #   every C run identical to B bit for bit (decision, reads, bounds, fallback logits);
+  #   B identical to the Phase 1C run on every recorded field;
+  #   storage served exactly the rows the store logged (minus cache hits), the device received
+  #   exactly those bytes, every block read holds a requested byte, and with direct I/O the
+  #   OS's own counters equal the reads and bytes the store reports.
+  # Gate B (real byte reduction), on the primary configuration against the baseline (which reads
+  # and moves 1.0 of the head per token):
+  max_mean_physical_fraction: 0.75   # mean bytes read from the drive per token
+  max_mean_h2d_fraction: 0.75        # mean bytes moved host-to-device per token
+  # Stop condition: the Phase 1C assumption (a logical 0.40-0.50) is invalidated if the
+  # physical mean of the primary configuration exceeds this.
+  invalidation_physical_fraction: 0.90

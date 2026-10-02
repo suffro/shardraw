@@ -5,3 +5,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# Phase 3 packs (derived from pinned checkpoints; rebuilt by the benchmarks)
+packs/

@@ -1,0 +1,10 @@
+{
+  "pack_sha256": "6c18f4499daba2deeee948fc7439316aca5a12ac8f1d18893f79c09744f59d46",
+  "prompts_sha256": "83c793990516d70eaddc8a32bca00bcab575e4cac0c81e882b2528b37e4a417d",
+  "reference_sha256": "9243f8c9fa9c97fb65eb6697e38a32b1ecb030bb83bcf2e9916d0c4995d61fee",
+  "records_sha256": "a5c33c8a3d4d54dcc4e38bda88ad426fb36e0166b68afc8134b8fe7574d3b8d6",
+  "excluded_fields": [
+    "timings_ms",
+    "system"
+  ]
+}

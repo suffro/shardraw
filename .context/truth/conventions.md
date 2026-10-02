@@ -36,7 +36,17 @@
   `python -m uv run python benchmarks/suffix_runtime.py --output experiments/phase2/<name>`
   (config `configs/phase2-suffix.yaml`, prompts of its `source_run`). Then
   `python -m uv run python benchmarks/suffix_report.py <run> --compare <second run>`.
-- Timing fields (`timings_ms`, `reference_ms`, `wall_ms`, `profile.json`) are recorded but
+- Phase 3 packs: `python -m uv run awpmi pack lm-head` and `python -m uv run awpmi pack experts`
+  write them under `packs/` (gitignored; deterministic, so they are rebuilt rather than
+  committed). Build them in their own process before a benchmark that times direct reads.
+- Phase 3 storage benchmark (the Phase 1C LM head on a tier):
+  `python -m uv run python benchmarks/storage_runtime.py --output experiments/phase3/<name>`
+  (config `configs/phase3-storage.yaml`), then
+  `python -m uv run python benchmarks/storage_report.py <run> --compare <second run>`.
+- Phase 3 MoE benchmark: `python -m uv run python benchmarks/moe_runtime.py --output experiments/phase3/<name>`
+  (config `configs/phase3-moe.yaml`), then
+  `python -m uv run python benchmarks/moe_report.py <run> --compare <second run>`.
+- Timing fields (`timings_ms`, `reference_ms`, `wall_ms`, `system`, `profile.json`) are recorded but
   excluded from digests. Runs that are compared for reproducibility must use the same source
   tree (`src`, `benchmarks`, `configs`; tests are not part of it).
 - Large raw record files are written as reproducible gzip (`*.jsonl.gz`, mtime 0);
@@ -69,3 +79,15 @@
   with the reference's shapes (all positions), never a subset, so that it is bitwise equal
   by determinism, and is checked bitwise on every prompt.
 - Decision-gate thresholds are fixed in config before a full run, not after seeing it.
+- Storage, transfer and materialization code (`awpmi.storage`, `awpmi.streaming`,
+  `awpmi.materialization`) never names a model, a tensor or a router, and never imports a layer
+  above it; model knowledge lives in `awpmi.models.*` (checked by `tests/test_layering.py`).
+- A storage-backed run is checked bit for bit against the same run on resident weights, and its
+  bytes are audited: the store's log (logical), what the backend was asked, what the cache
+  served, what storage read (physical: the bytes the reads returned), what crossed to the
+  device. With direct I/O the physical reads must equal the OS's own per-process counters.
+- Do not mix buffered and direct access to one file in a measurement: on NTFS a file with an
+  active cache map makes direct reads several times slower. Verify packs with direct reads; let
+  the OS close cached handles (a few seconds) after loading a model from the same file.
+- A new storage or transfer path needs the no-hidden-reads property tested: every positioned
+  read lies in a planned extent, and bytes outside the requested rows never reach the output.

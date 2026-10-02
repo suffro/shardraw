@@ -31,7 +31,10 @@ The last two are the two levers Phase 1B left for its 9.6% of fallbacks.
    - A run's effective bytes are the store's log. Every benchmark asserts that they equal
      the decomposition's `materialized_bytes` for the same rows.
    - Phase 1C keeps the store resident, so a read is a gather. Phase 3 makes reads
-     physical.
+     physical. (Done in Phase 3, decision 0006: the same reads from a pack on the drive,
+     each level row stored as one record, payload then scale. The 4 KiB model of this
+     decision matched the measured drive bytes: 0.468 of the head plus 0.014 of resident
+     metadata, against 0.482 predicted.)
 2. **Binary32 coarse pass** (`awpmi.bounds.coarse`, `coarse_matvec`).
    - The base level of every row is decoded in chunks and multiplied by h with
      `torch.mv` in binary32. The centre c = s·fl(S) is exact in float64.
