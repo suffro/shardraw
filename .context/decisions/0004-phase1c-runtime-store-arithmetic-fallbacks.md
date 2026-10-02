@@ -60,6 +60,8 @@ The last two are the two levers Phase 1B left for its 9.6% of fallbacks.
    use it. (Superseded from Phase 2 on by decision 0005: MASKED is the default, FULL the
    canonical fallback behind it.)
 6. **MASKED fallback is adopted as an opt-in runtime mode** (`FallbackMode.MASKED`).
+   (From Phase 2 on it is the default, decision 0005; a failed self-test now switches the
+   head to FULL instead of refusing to build it.)
    - What it does: a full-shape `F.linear` on the surviving rows, with zeros elsewhere,
      and the argmax taken over the survivors. The survivors' rows were already read in
      the exact state, so it reads no extra bytes.
