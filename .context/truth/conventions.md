@@ -26,6 +26,14 @@
   `python -m uv run python benchmarks/refinement_oracle.py --output experiments/phase1b/<name>`.
   It reuses the prompts of `source_run` in `configs/phase1b-refinement.yaml`. Then
   `python -m uv run python benchmarks/refinement_report.py <run> --compare <second run>`.
+- Phase 1C runtime benchmark:
+  `python -m uv run python benchmarks/refinement_runtime.py --output experiments/phase1c/<name>`
+  (config `configs/phase1c-runtime.yaml`, prompts of its `source_run`, comparison with its
+  `oracle_run`). Then
+  `python -m uv run python benchmarks/refinement_runtime_report.py <run> --compare <second run>`.
+  Fallback evidence: `python -m uv run python benchmarks/fallback_study.py --output <dir>`.
+- Timing fields (`timings_ms`, `reference_ms`, `profile.json`) are recorded but excluded
+  from digests. Runs that are compared for reproducibility must use the same source tree.
 - Large raw record files are written as reproducible gzip (`*.jsonl.gz`, mtime 0);
   `read_jsonl` reads both forms. Digests are computed over the decoded records.
 
@@ -41,5 +49,9 @@
   violation, non-bitwise fallback, prefix mismatch) and save it to `failure.json`.
 - Byte savings are reported as *effective* bytes: every resident metadata byte, every
   scale, and the fallback's reads count (decision 0003). Never report page counts
-  alone.
+  alone. A runtime's bytes are what its store's read log says, and must equal the
+  decomposition's accounting for the same rows (decision 0004).
+- A runtime reads weight values only through a store. Bounds for the runtime's own
+  arithmetic live in `awpmi.bounds` and are validated twice: against exact rational
+  arithmetic in tests, and against float64 on every benchmark prompt.
 - Decision-gate thresholds are fixed in config before a full run, not after seeing it.

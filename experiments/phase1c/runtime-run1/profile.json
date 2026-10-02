@@ -1,0 +1,50 @@
+{
+  "repetitions": 200,
+  "micro": {
+    "reference_lm_head_ms": 0.21385549975093454,
+    "coarse_decode_ms": 2.673208999913186,
+    "coarse_mv_on_decoded_ms": 0.4293509997660294,
+    "coarse_matvec_ms": 3.3620019996305928
+  },
+  "runs": [
+    {
+      "prompt_position": 0,
+      "decision_state_index": 1,
+      "fallback": null,
+      "rows_loaded": [
+        49152,
+        4,
+        0
+      ],
+      "wall_ms_without_stage_sync": 14.342295000096783,
+      "device_kernel_ms": 3.6474760000000614,
+      "kernel_launches": 610
+    },
+    {
+      "prompt_position": 1,
+      "decision_state_index": 2,
+      "fallback": null,
+      "rows_loaded": [
+        49152,
+        3363,
+        3
+      ],
+      "wall_ms_without_stage_sync": 23.833149997517467,
+      "device_kernel_ms": 4.708249999999983,
+      "kernel_launches": 782
+    },
+    {
+      "prompt_position": 15,
+      "decision_state_index": null,
+      "fallback": "full",
+      "rows_loaded": [
+        49152,
+        1177,
+        5
+      ],
+      "wall_ms_without_stage_sync": 26.06722000055015,
+      "device_kernel_ms": 5.933129000000026,
+      "kernel_launches": 812
+    }
+  ]
+}

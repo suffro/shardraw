@@ -45,21 +45,13 @@ from awpmi.decomposition import RefinementDecomposition  # noqa: E402
 from awpmi.models.smollm2 import ModelSpec, final_hidden_state, lm_head_weight, load_model, resolve_dtype  # noqa: E402
 from awpmi.oracle.refinement import IO_BLOCK_BYTES, BoundTier, Mode, RefinementBatch, simulate  # noqa: E402
 from awpmi.reference import ReferenceRunner  # noqa: E402
-from awpmi.tracing import JsonlWriter, canonical_digest, environment_metadata, read_jsonl  # noqa: E402
+from awpmi.tracing import JsonlWriter, canonical_digest, environment_metadata, read_jsonl, tensor_digest  # noqa: E402
 
 OUTPUT_FILES = ("decompositions.json", "reference.jsonl", "validation.jsonl", "records.jsonl.gz")
 
 
 class HardFailure(Exception):
     pass
-
-
-def tensor_digest(*tensors: torch.Tensor | None) -> str:
-    digest = hashlib.sha256()
-    for tensor in tensors:
-        if tensor is not None:
-            digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
-    return digest.hexdigest()
 
 
 def reference_pass(model, runner, weight, prompts, device, failures, keep_going, log):

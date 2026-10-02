@@ -94,6 +94,23 @@ class ResidualBounder:
         return reference_logit_interval(partial_logits, radius, self.numerics.output_dtype)
 
 
+def remainder_radius(
+    miss: torch.Tensor, reference_mass: torch.Tensor, center_mass: torch.Tensor, numerics: ReferenceNumerics
+) -> torch.Tensor:
+    """Radius of a row whose remainder is still missing (Phase 1B/1C states before the exact one).
+
+    miss bounds the remainder's contribution, reference_mass ≥ Σ_k |W_jk h_k| feeds the
+    reference accumulator's error and center_mass bounds the absolute mass behind the
+    centre's float64 error: r = miss + γ_acc·reference_mass + γ₆₄·center_mass.
+    """
+    return miss + numerics.accumulation_gamma * reference_mass + numerics.float64_gamma * center_mass
+
+
+def exact_radius(absolute_mass: torch.Tensor, numerics: ReferenceNumerics) -> torch.Tensor:
+    """Radius of a row computed from its exact weights: only the two floating-point error terms remain."""
+    return (numerics.accumulation_gamma + numerics.float64_gamma) * absolute_mass
+
+
 def reference_logit_interval(
     center: torch.Tensor, radius: torch.Tensor, output_dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:

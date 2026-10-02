@@ -10,8 +10,7 @@ X_s = W − Σ_{l≤s} L_l is the remainder after state s. A row moves through s
                   checkpoint's own), so the reference operation can be recomputed
 
 The final refinement is therefore the original BF16 row, not a separately encoded
-remainder: storing X_{n-1} compactly is a Phase 1C question. Its bytes are charged
-in full whenever a row reaches the exact state.
+remainder. Its bytes are charged in full whenever a row reaches the exact state.
 
 This module only builds levels, checks exactness and accounts for bytes. Bounds
 on missing remainders live in `awpmi.bounds.remainder`; certification and
@@ -20,13 +19,13 @@ simulation live elsewhere.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
 
 from awpmi.bounds.remainder import InputNorms, RowNormBounds, remainder_mass_bound, row_norm_bounds
+from awpmi.decomposition.packing import payload_bytes
 from awpmi.decomposition.quantization import SCALE_DTYPE, code_limit, dequantize_rows, quantize_rows
 
 
@@ -45,8 +44,8 @@ class RefinementLevel:
 
     @property
     def payload_bytes_per_row(self) -> int:
-        """Bit-packed codes."""
-        return math.ceil(self.in_features * self.bits / 8)
+        """Bit-packed codes (`awpmi.decomposition.packing`)."""
+        return payload_bytes(self.in_features, self.bits)
 
     @property
     def scale_bytes_per_row(self) -> int:

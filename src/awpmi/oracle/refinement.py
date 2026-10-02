@@ -45,11 +45,21 @@ import torch
 
 from awpmi.bounds.linear import absolute_mass_upper
 from awpmi.bounds.remainder import input_norms
-from awpmi.bounds.residual import ReferenceNumerics, reference_logit_interval
+from awpmi.bounds.residual import ReferenceNumerics, exact_radius, reference_logit_interval, remainder_radius
 from awpmi.certificate import TieBreak, certify_columns, contenders
 from awpmi.decomposition import RefinementDecomposition
+from awpmi.decomposition.accounting import IO_BLOCK_BYTES, blocks_touched
 
-IO_BLOCK_BYTES = 4096
+__all__ = [
+    "IO_BLOCK_BYTES",
+    "BoundTier",
+    "Mode",
+    "RefinementBatch",
+    "Simulation",
+    "StateIntervals",
+    "blocks_touched",
+    "simulate",
+]
 
 
 class BoundTier(enum.Enum):
@@ -118,7 +128,6 @@ class RefinementBatch:
         self.weight_mass = absolute_mass_upper(weight, columns)
 
     def intervals(self, tier: BoundTier) -> StateIntervals:
-        gamma_acc, gamma_64 = self.numerics.accumulation_gamma, self.numerics.float64_gamma
         lowers, uppers = [], []
         for state in range(self.decomposition.exact_state):
             miss = self.missing[tier][state]
@@ -126,11 +135,11 @@ class RefinementBatch:
                 reference_mass = center_mass = self.level_masses[state] + miss
             else:
                 reference_mass, center_mass = self.weight_mass, self.level_masses[state]
-            radius = miss + gamma_acc * reference_mass + gamma_64 * center_mass
+            radius = remainder_radius(miss, reference_mass, center_mass, self.numerics)
             lower, upper = reference_logit_interval(self.centers[state], radius, self.numerics.output_dtype)
             lowers.append(lower)
             uppers.append(upper)
-        radius = (gamma_acc + gamma_64) * self.weight_mass
+        radius = exact_radius(self.weight_mass, self.numerics)
         lower, upper = reference_logit_interval(self.exact_center, radius, self.numerics.output_dtype)
         lowers.append(lower)
         uppers.append(upper)
@@ -153,29 +162,6 @@ class Simulation:
     rows_loaded: torch.Tensor
     io_blocks: torch.Tensor
     final_contenders: torch.Tensor
-
-
-def blocks_touched(rows: torch.Tensor, row_bytes: int, block_bytes: int = IO_BLOCK_BYTES) -> torch.Tensor:
-    """Distinct `block_bytes` blocks read per column when the selected rows [V, B] of a row-major file are read."""
-    count = rows.shape[1]
-    if row_bytes == 0:
-        return torch.zeros(count, dtype=torch.int64, device=rows.device)
-    if row_bytes > block_bytes:
-        raise ValueError("rows larger than a block are not supported")
-    index = torch.arange(rows.shape[0], device=rows.device)
-    first = (index * row_bytes) // block_bytes
-    last = ((index + 1) * row_bytes - 1) // block_bytes
-    blocks = torch.arange(int(last[-1]) + 1, device=rows.device)
-    prefix = torch.cat([torch.zeros(1, count, dtype=torch.int64, device=rows.device), rows.long().cumsum(dim=0)])
-
-    def selected_with(key: torch.Tensor) -> torch.Tensor:
-        # `key` is non-decreasing, so the rows whose key is b form one contiguous range.
-        start = torch.searchsorted(key, blocks, right=False)
-        stop = torch.searchsorted(key, blocks, right=True)
-        return prefix[stop] - prefix[start]
-
-    # A row no larger than a block touches only its first and last blocks.
-    return ((selected_with(first) > 0) | (selected_with(last) > 0)).sum(dim=0)
 
 
 def simulate(

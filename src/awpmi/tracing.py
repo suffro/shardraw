@@ -9,6 +9,7 @@ import json
 import platform
 import subprocess
 import sys
+import time
 from collections.abc import Iterable, Mapping
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -17,6 +18,18 @@ from typing import Any
 import torch
 
 TRACKED_PACKAGES = ("torch", "transformers", "safetensors", "numpy", "huggingface-hub", "tokenizers", "pyarrow")
+
+
+def tensor_digest(*tensors: torch.Tensor | None) -> str:
+    """sha256 over the raw bytes of the given tensors, in order (None entries are skipped)."""
+    digest = hashlib.sha256()
+    for tensor in tensors:
+        if tensor is not None:
+            data = tensor.detach().cpu().contiguous()
+            if data.dtype == torch.bfloat16:  # numpy has no bfloat16: hash the same bytes as int16
+                data = data.view(torch.int16)
+            digest.update(data.numpy().tobytes())
+    return digest.hexdigest()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -113,6 +126,46 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     opener = gzip.open if _is_gzip(path) else open
     with opener(path, "rt", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+class StageTimer:
+    """Wall-clock milliseconds per named stage of one run.
+
+    With `synchronize` on a CUDA device, every mark first waits for the queued
+    device work, so a stage is charged for its own kernels. Repeated stage names
+    accumulate.
+    """
+
+    def __init__(self, device: torch.device, synchronize: bool = True) -> None:
+        self._synchronize = synchronize and device.type == "cuda"
+        self.stages: dict[str, float] = {}
+        self._last = 0.0
+
+    def _now(self) -> float:
+        if self._synchronize:
+            torch.cuda.synchronize()
+        return time.perf_counter()
+
+    def start(self) -> None:
+        self.stages = {}
+        self._last = self._now()
+
+    def mark(self, stage: str) -> None:
+        now = self._now()
+        self.stages[stage] = self.stages.get(stage, 0.0) + (now - self._last) * 1e3
+        self._last = now
+
+
+class NullTimer:
+    """A StageTimer that measures nothing and never synchronizes."""
+
+    stages: dict[str, float] = {}
+
+    def start(self) -> None:
+        pass
+
+    def mark(self, stage: str) -> None:
+        pass
 
 
 def canonical_digest(records: Iterable[Mapping[str, Any]], exclude_keys: Iterable[str] = ()) -> str:

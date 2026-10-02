@@ -1,0 +1,25 @@
+{
+  "masked": {
+    "checks": 2560,
+    "mismatches": 0
+  },
+  "rounding": {
+    "cuda": {
+      "nearest_even": 49152,
+      "toward_zero": 24647,
+      "down": 24611,
+      "up": 24612,
+      "faithful": 49152,
+      "cases": 49152
+    },
+    "cpu": {
+      "nearest_even": 49152,
+      "toward_zero": 24647,
+      "down": 24611,
+      "up": 24612,
+      "faithful": 49152,
+      "cases": 49152
+    }
+  },
+  "elapsed_s": 36
+}

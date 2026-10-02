@@ -1,0 +1,39 @@
+# AWPMI Phase 1C: the q6+q4 LM-head runtime (decision 0004).
+
+# The Phase 1A run whose prompts, model and reference numerics are reused.
+source_run: experiments/phase1/cs-column-baseline-run1
+# The Phase 1B run whose records (primary configuration) the runtime is compared with.
+oracle_run: experiments/phase1b/refinement-run1
+
+decomposition: q6+q4
+tie_break: lowest_index
+
+# full: read every BF16 row not read yet and recompute the reference operation (decision 0002).
+#       Primary: the gate is evaluated on it.
+# masked: full-shape GEMM on the surviving rows only (decision 0004). Opt-in, self-tested and
+#       guarded; reported next to full.
+fallbacks: [full, masked]
+
+runtime:
+  # Unit roundoff assumed for the binary32 coarse pass: 2^-22, as for the reference accumulator.
+  coarse_unit_roundoff: 2.384185791015625e-07
+  # Rows decoded per coarse-pass chunk (keeps the decoded codes cache-sized).
+  chunk_rows: 8192
+  masked_self_test_trials: 16
+
+timing:
+  # Prompts run once, unrecorded, before measuring (kernel loading, allocator warm-up).
+  warmup_prompts: 5
+  # Synchronize the device at every stage boundary, so each stage is charged its own kernels.
+  synchronize: true
+  # Micro-benchmarks in profile.json: repetitions per measured operation.
+  profile_repetitions: 200
+  # Prompts (by position) traced with the PyTorch profiler: kernel time against wall time.
+  profile_prompts: [0, 1, 15]
+
+# Decision gate, fixed before the full run (decision 0004). Fractions are effective bytes to a
+# decision (all resident metadata, scales and the conservative full fallback) divided by the
+# original BF16 LM-head bytes, for the primary configuration (full fallback).
+gate:
+  max_mean_fraction: 0.60                     # the runtime keeps the Phase 1B PROMISING level
+  max_mean_fraction_excess_over_oracle: 0.01  # the runtime's own arithmetic costs at most 1% of the head

@@ -22,6 +22,11 @@ The float64 page-accumulated logits are used only for certification and for the
 "AWPMI logits ≈ reference" check. That check uses the derived envelope as its
 tolerance.
 
+**Extended in decision 0004.** The Phase 1C runtime keeps this fallback as its default
+(`FallbackMode.FULL`). It also offers an opt-in `FallbackMode.MASKED`, which runs the
+same operation with the full shape on the surviving rows only. That mode relies on the
+GEMM's row independence, and it is self-tested, guarded and evidenced.
+
 ## Rejected
 
 - *Taking argmax of the float64 page-accumulated logits as the fallback.* It can

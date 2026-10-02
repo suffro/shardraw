@@ -1,0 +1,42 @@
+{
+  "decomposition": "q6+q4",
+  "states": [
+    "q6",
+    "q4",
+    "exact"
+  ],
+  "row_bytes": {
+    "0:q6": [
+      432,
+      4
+    ],
+    "1:q4": [
+      288,
+      4
+    ],
+    "2:exact": [
+      1152,
+      0
+    ]
+  },
+  "metadata_bytes": 786432,
+  "storage_bytes": {
+    "levels": 35782656,
+    "original": 56623104,
+    "metadata": 786432,
+    "total": 93192192
+  },
+  "weight_bytes": 56623104,
+  "packing_lossless": true,
+  "accounting_matches_decomposition": true,
+  "levels_sha256": "3e1f2a86a7e55cb551617a6f40dc3d44c88b80e41d018590de1fbcdd1563d2b7",
+  "levels_match_oracle_run": true,
+  "store_sha256": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755",
+  "masked_fallback_self_test": {
+    "full": null,
+    "masked": {
+      "trials": 16,
+      "mismatches": 0
+    }
+  }
+}

@@ -1,0 +1,22 @@
+source_run: experiments/phase1/cs-column-baseline-run1
+oracle_run: experiments/phase1b/refinement-run1
+decomposition: q6+q4
+tie_break: lowest_index
+fallbacks:
+- full
+- masked
+runtime:
+  coarse_unit_roundoff: 2.384185791015625e-07
+  chunk_rows: 8192
+  masked_self_test_trials: 16
+timing:
+  warmup_prompts: 5
+  synchronize: true
+  profile_repetitions: 200
+  profile_prompts:
+  - 0
+  - 1
+  - 15
+gate:
+  max_mean_fraction: 0.6
+  max_mean_fraction_excess_over_oracle: 0.01
