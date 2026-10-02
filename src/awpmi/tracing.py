@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 import platform
 import subprocess
@@ -72,16 +74,33 @@ def environment_metadata(repo_root: Path, model: Mapping[str, Any], numerics_fla
     }
 
 
+def _is_gzip(path: str | Path) -> bool:
+    return str(path).endswith(".gz")
+
+
 class JsonlWriter:
+    """One JSON object per line; a `.gz` path is gzip-compressed reproducibly (no name, mtime 0)."""
+
     def __init__(self, path: str | Path) -> None:
-        self._handle = open(path, "w", encoding="utf-8", newline="\n")
+        if _is_gzip(path):
+            self._raw = open(path, "wb")
+            compressed = gzip.GzipFile(filename="", mode="wb", fileobj=self._raw, mtime=0)
+            self._handle = io.TextIOWrapper(compressed, encoding="utf-8", newline="\n")
+        else:
+            self._raw = None
+            self._handle = open(path, "w", encoding="utf-8", newline="\n")
 
     def write(self, record: Mapping[str, Any]) -> None:
         self._handle.write(json.dumps(record, sort_keys=True) + "\n")
-        self._handle.flush()
+        if self._raw is None:
+            # Per-line gzip flushes would bloat the stream; plain files stay readable mid-run.
+            self._handle.flush()
 
     def close(self) -> None:
         self._handle.close()
+        if self._raw is not None:
+            # GzipFile does not close a file object it was given.
+            self._raw.close()
 
     def __enter__(self) -> JsonlWriter:
         return self
@@ -91,7 +110,8 @@ class JsonlWriter:
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    with open(path, encoding="utf-8") as handle:
+    opener = gzip.open if _is_gzip(path) else open
+    with opener(path, "rt", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
 
 

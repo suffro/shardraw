@@ -1,0 +1,343 @@
+{
+  "none": {
+    "spec": "none",
+    "states": [
+      "zero",
+      "exact"
+    ],
+    "row_bytes": {
+      "zero": [
+        0,
+        0
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 0,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 57016320
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "b91824451bd19d8bdd5bf2efc2a60806fcfb90a5cf2be2a6e7b4360be0df5b00"
+  },
+  "q8": {
+    "spec": "q8",
+    "states": [
+      "q8",
+      "exact"
+    ],
+    "row_bytes": {
+      "q8": [
+        576,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 28508160,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 85524480
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "1b31f3bf9feaaa725e1caaf1f00322dfafa03fe1110f090f6fa0a583545c368c"
+  },
+  "q7": {
+    "spec": "q7",
+    "states": [
+      "q7",
+      "exact"
+    ],
+    "row_bytes": {
+      "q7": [
+        504,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 24969216,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 81985536
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "fc9d274b5742d0297774c45f80145ef4fad4391fcef22c3f29da826a681812fe"
+  },
+  "q6": {
+    "spec": "q6",
+    "states": [
+      "q6",
+      "exact"
+    ],
+    "row_bytes": {
+      "q6": [
+        432,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 21430272,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 78446592
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "95c300d8ef001b4c8302d28be0179546d73cfb20ea624663d9505f59e8423eba"
+  },
+  "q5": {
+    "spec": "q5",
+    "states": [
+      "q5",
+      "exact"
+    ],
+    "row_bytes": {
+      "q5": [
+        360,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 17891328,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 74907648
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "eb43270d9010a332e29024a34cc1dc5b180f9498fda7203dddb7f80252ddd6b2"
+  },
+  "q4": {
+    "spec": "q4",
+    "states": [
+      "q4",
+      "exact"
+    ],
+    "row_bytes": {
+      "q4": [
+        288,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 14352384,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 71368704
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "c845aa8e62e4543dd5e3789a2301933828e073bdac875e308e6bdf0762bbe311"
+  },
+  "q3": {
+    "spec": "q3",
+    "states": [
+      "q3",
+      "exact"
+    ],
+    "row_bytes": {
+      "q3": [
+        216,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 10813440,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 67829760
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "d7e3bc01b55a2fb51e49b5c5a13721ebd906dcc0e92557bc85c5bcee2ff2c020"
+  },
+  "q2": {
+    "spec": "q2",
+    "states": [
+      "q2",
+      "exact"
+    ],
+    "row_bytes": {
+      "q2": [
+        144,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 393216,
+    "storage_bytes": {
+      "levels": 7274496,
+      "original": 56623104,
+      "metadata": 393216,
+      "total": 64290816
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "eeda05f459e737a22faab8e717bcc16f75eeff55059092dbaa5d4434f794d32d"
+  },
+  "q4+q4": {
+    "spec": "q4+q4",
+    "states": [
+      "q4",
+      "q4",
+      "exact"
+    ],
+    "row_bytes": {
+      "q4": [
+        288,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 786432,
+    "storage_bytes": {
+      "levels": 28704768,
+      "original": 56623104,
+      "metadata": 786432,
+      "total": 86114304
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "dd4028afc231562671cfdce5990c02091126b7165ec6b32998b2f06eef40d21b"
+  },
+  "q4+q2": {
+    "spec": "q4+q2",
+    "states": [
+      "q4",
+      "q2",
+      "exact"
+    ],
+    "row_bytes": {
+      "q4": [
+        288,
+        4
+      ],
+      "q2": [
+        144,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 786432,
+    "storage_bytes": {
+      "levels": 21626880,
+      "original": 56623104,
+      "metadata": 786432,
+      "total": 79036416
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "acc75dc105f78886c7f1c6c5a5c4cbfad9756a5b2d35bfd72bdc45f6a091bb52"
+  },
+  "q6+q4": {
+    "spec": "q6+q4",
+    "states": [
+      "q6",
+      "q4",
+      "exact"
+    ],
+    "row_bytes": {
+      "q6": [
+        432,
+        4
+      ],
+      "q4": [
+        288,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 786432,
+    "storage_bytes": {
+      "levels": 35782656,
+      "original": 56623104,
+      "metadata": 786432,
+      "total": 93192192
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "3e1f2a86a7e55cb551617a6f40dc3d44c88b80e41d018590de1fbcdd1563d2b7"
+  },
+  "q2+q2+q4": {
+    "spec": "q2+q2+q4",
+    "states": [
+      "q2",
+      "q2",
+      "q4",
+      "exact"
+    ],
+    "row_bytes": {
+      "q2": [
+        144,
+        4
+      ],
+      "q4": [
+        288,
+        4
+      ],
+      "exact": [
+        1152,
+        0
+      ]
+    },
+    "metadata_bytes": 1179648,
+    "storage_bytes": {
+      "levels": 28901376,
+      "original": 56623104,
+      "metadata": 1179648,
+      "total": 86704128
+    },
+    "weight_bytes": 56623104,
+    "reconstruction_exact": true,
+    "levels_sha256": "7b58d73a6d03c21086ccdb734e91f08611e799f792f6ed260c21cbd010f818df"
+  }
+}

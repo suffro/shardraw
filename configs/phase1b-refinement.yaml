@@ -1,0 +1,31 @@
+# AWPMI Phase 1B: precision-refinement decomposition search (oracle only).
+
+# The Phase 1A run whose prompts, model and numerics config are reused, and whose
+# summary.json provides the baseline.
+source_run: experiments/phase1/cs-column-baseline-run1
+
+# W = base + refinements + exact remainder. "none" has no base (row-norm metadata
+# only); "q6+q4" is an int6 base and an int4 refinement of its remainder. Every
+# decomposition ends in the exact state, which reads the original BF16 row.
+decompositions: [none, q8, q7, q6, q5, q4, q3, q2, q4+q4, q4+q2, q6+q4, q2+q2+q4]
+
+# (bound tier, tie break) pairs, each simulated in every mode.
+configurations:
+  - [realistic, strict]
+  - [realistic, lowest_index]
+  - [abs_mass, lowest_index]
+  - [ideal, lowest_index]
+
+modes: [global, row_selective]
+
+# Inputs per batch (GPU memory: about 40 MB per [states x vocab x batch] float64 tensor at 50).
+batch_size: 50
+
+# Decision gate, fixed before the run (decision 0003). Fractions are effective bytes
+# to a decision (including all metadata and the conservative fallback) divided by
+# the original BF16 LM-head bytes. They are measured on the primary configuration:
+# realistic bound, lowest_index ties, row_selective mode.
+gate:
+  promising_max_fraction: 0.60          # realistic mean fraction at most this
+  promising_min_ideal_saving_share: 0.5 # realistic saving at least this share of the ideal saving
+  decomposition_limited_ideal_fraction: 0.5  # ideal mean fraction above this: reject the decomposition

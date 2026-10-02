@@ -1,0 +1,31 @@
+source_run: experiments/phase1/cs-column-baseline-run1
+decompositions:
+- none
+- q8
+- q7
+- q6
+- q5
+- q4
+- q3
+- q2
+- q4+q4
+- q4+q2
+- q6+q4
+- q2+q2+q4
+configurations:
+- - realistic
+  - strict
+- - realistic
+  - lowest_index
+- - abs_mass
+  - lowest_index
+- - ideal
+  - lowest_index
+modes:
+- global
+- row_selective
+batch_size: 50
+gate:
+  promising_max_fraction: 0.6
+  promising_min_ideal_saving_share: 0.5
+  decomposition_limited_ideal_fraction: 0.5

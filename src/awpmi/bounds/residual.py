@@ -90,8 +90,21 @@ class ResidualBounder:
         self, partial_logits: torch.Tensor, remaining_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Lower/upper bounds on every reference logit, on the reference output grid."""
-        radius = (self.residual_radius(remaining_mask) + self._error_radius) * (1.0 + FLOAT64_BOUND_SLACK)
-        # One more float64 rounding in each of the additions below: step outward one ulp.
-        lower = round_down_to_grid(next_down(partial_logits - radius), self.numerics.output_dtype)
-        upper = round_up_to_grid(next_up(partial_logits + radius), self.numerics.output_dtype)
-        return lower, upper
+        radius = self.residual_radius(remaining_mask) + self._error_radius
+        return reference_logit_interval(partial_logits, radius, self.numerics.output_dtype)
+
+
+def reference_logit_interval(
+    center: torch.Tensor, radius: torch.Tensor, output_dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Output-grid interval enclosing every reference logit within `radius` of `center`.
+
+    `radius` is a float64 sum of non-negative terms that already bounds the missing
+    contribution and both floating-point error terms; FLOAT64_BOUND_SLACK covers the
+    rounding of that sum.
+    """
+    radius = radius * (1.0 + FLOAT64_BOUND_SLACK)
+    # One more float64 rounding in each of the additions below: step outward one ulp.
+    lower = round_down_to_grid(next_down(center - radius), output_dtype)
+    upper = round_up_to_grid(next_up(center + radius), output_dtype)
+    return lower, upper

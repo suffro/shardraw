@@ -22,6 +22,12 @@
   Reproducibility is judged by comparing the digests of two identical runs.
 - Ordering vs. bound diagnosis:
   `python -m uv run python benchmarks/oracle.py <run> --output <run>-oracle`.
+- Phase 1B decomposition oracle:
+  `python -m uv run python benchmarks/refinement_oracle.py --output experiments/phase1b/<name>`.
+  It reuses the prompts of `source_run` in `configs/phase1b-refinement.yaml`. Then
+  `python -m uv run python benchmarks/refinement_report.py <run> --compare <second run>`.
+- Large raw record files are written as reproducible gzip (`*.jsonl.gz`, mtime 0);
+  `read_jsonl` reads both forms. Digests are computed over the decoded records.
 
 ## Important rules
 
@@ -33,3 +39,7 @@
   flags apply to both sides and are recorded.
 - Benchmarks stop at the first hard failure (certified or fallback mismatch, envelope
   violation, non-bitwise fallback, prefix mismatch) and save it to `failure.json`.
+- Byte savings are reported as *effective* bytes: every resident metadata byte, every
+  scale, and the fallback's reads count (decision 0003). Never report page counts
+  alone.
+- Decision-gate thresholds are fixed in config before a full run, not after seeing it.

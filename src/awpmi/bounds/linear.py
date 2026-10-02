@@ -40,3 +40,22 @@ def block_l2_norm_upper(
 def page_contribution(weight_page: torch.Tensor, hidden_block: torch.Tensor) -> torch.Tensor:
     """W_p h_p in float64. Error ≤ γ_width(2⁻⁵³)·Σ|W_jk h_k|, accounted for in residual bounds."""
     return weight_page.to(torch.float64) @ hidden_block.to(torch.float64)
+
+
+def l1_norm_upper(values: torch.Tensor) -> torch.Tensor:
+    """Upper bounds on ‖values[..., :]‖₁ along the last axis, in float64."""
+    block = values.to(torch.float64).abs()
+    # A sum of K non-negative terms errs by at most γ_K relative; one more ulp for the product.
+    return next_up(block.sum(dim=-1) * (1.0 + gamma(block.shape[-1] + 1, FLOAT64_UNIT_ROUNDOFF)))
+
+
+def absolute_mass_upper(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Upper bound on |left| @ |right| (entrywise absolute values), e.g. Σ_k |W_jk|·|h_k| per row.
+
+    Both operands must be float64. Each product rounds once and the K-term sum of
+    non-negative terms errs by at most γ_K relative, whatever the evaluation order.
+    """
+    if left.dtype != torch.float64 or right.dtype != torch.float64:
+        raise TypeError("absolute_mass_upper expects float64 operands")
+    products = left.abs() @ right.abs()
+    return next_up(products * (1.0 + gamma(left.shape[-1] + 2, FLOAT64_UNIT_ROUNDOFF)))

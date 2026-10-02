@@ -58,3 +58,5 @@ outward.
 - *Tie-aware relaxation* (allowing `lower[w] == upper[j]` when j > w). It would be
   sound, but it adds a rule that depends on the reference's tie-breaking for little
   gain. It can be revisited if the coverage lost to exact grid ties matters.
+  **Revisited in decision 0003:** it is now available as `TieBreak.LOWEST_INDEX`.
+  `TieBreak.STRICT` remains the default, which keeps the Phase 1A behaviour.

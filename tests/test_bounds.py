@@ -10,7 +10,8 @@ import torch
 import torch.nn.functional as F
 
 from awpmi.bounds.floating import gamma, round_down_to_grid, round_up_to_grid
-from awpmi.bounds.linear import block_l2_norm_upper
+from awpmi.bounds.linear import absolute_mass_upper, block_l2_norm_upper, l1_norm_upper
+from awpmi.bounds.remainder import input_norms, remainder_mass_bound, row_norm_bounds
 from awpmi.bounds.residual import FP32_ACCUMULATION_UNIT_ROUNDOFF, ReferenceNumerics, ResidualBounder
 from awpmi.paging.index import column_partition
 from tests.conftest import DEVICES
@@ -139,6 +140,50 @@ def test_reference_gemm_lies_in_envelope(device, dtype):
     partial = partial_logits(weight, hidden, slices, range(len(slices)))
     lower, upper = bounder.logit_bounds(partial, torch.zeros(len(slices), dtype=torch.bool, device=device))
     assert bool((reference >= lower).all()) and bool((reference <= upper).all())
+
+
+def exact_abs_mass(row: list[float], hidden: list[float]) -> Fraction:
+    return sum((abs(Fraction(a)) * abs(Fraction(b)) for a, b in zip(row, hidden)), Fraction(0))
+
+
+def test_l1_norm_and_absolute_mass_upper_bounds_are_sound_exactly():
+    generator = torch.Generator().manual_seed(7)
+    # float64 remainders with long significands, not just BF16 values.
+    left = torch.randn(20, 70, generator=generator, dtype=torch.float64) * (1 + 1e-9 * torch.rand(20, 70, generator=generator, dtype=torch.float64))
+    left[0] = 1.0 / 3.0  # identical entries
+    right = torch.randn(70, 5, generator=generator, dtype=torch.float64)
+    l1 = l1_norm_upper(left)
+    mass = absolute_mass_upper(left, right)
+    for j in range(left.shape[0]):
+        row = left[j].tolist()
+        assert Fraction(l1[j].item()) >= sum((abs(Fraction(v)) for v in row), Fraction(0))
+        for b in range(right.shape[1]):
+            assert Fraction(mass[j, b].item()) >= exact_abs_mass(row, right[:, b].tolist())
+
+
+def test_remainder_bound_is_sound_and_tight_where_expected():
+    """|x·h| ≤ Σ|x||h| ≤ bound exactly; Cauchy–Schwarz is tight for h ∥ x and Hölder for one-hot h."""
+    generator = torch.Generator().manual_seed(8)
+    remainder = torch.randn(16, 48, generator=generator, dtype=torch.float64) * 1e-3
+    rows = row_norm_bounds(remainder)
+    hidden = torch.randn(6, 48, generator=generator).to(torch.bfloat16)
+    hidden[0] = remainder[3].to(torch.bfloat16) * 1000  # nearly parallel to row 3
+    hidden[1] = 0.0
+    hidden[1, int(remainder[5].abs().argmax())] = 4.0  # one-hot on row 5's largest entry
+    inputs = input_norms(hidden)
+    batch = remainder_mass_bound(rows, inputs)
+    assert batch.shape == (16, 6)
+    for b in range(hidden.shape[0]):
+        single = remainder_mass_bound(rows, input_norms(hidden[b]))
+        assert torch.equal(single, batch[:, b])
+        h = hidden[b].to(torch.float64).tolist()
+        for j in range(remainder.shape[0]):
+            x = remainder[j].tolist()
+            exact = sum((Fraction(a) * Fraction(c) for a, c in zip(x, h)), Fraction(0))
+            assert abs(exact) <= exact_abs_mass(x, h) <= Fraction(batch[j, b].item())
+    # Tightness of the two halves of the minimum.
+    assert float(batch[3, 0]) <= 1.01 * float((remainder[3] @ hidden[0].double()).abs())
+    assert float(batch[5, 1]) <= 1.0001 * float((remainder[5] @ hidden[1].double()).abs())
 
 
 @pytest.mark.parametrize("device", DEVICES)
