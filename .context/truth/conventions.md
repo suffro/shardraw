@@ -32,8 +32,13 @@
   `oracle_run`). Then
   `python -m uv run python benchmarks/refinement_runtime_report.py <run> --compare <second run>`.
   Fallback evidence: `python -m uv run python benchmarks/fallback_study.py --output <dir>`.
-- Timing fields (`timings_ms`, `reference_ms`, `profile.json`) are recorded but excluded
-  from digests. Runs that are compared for reproducibility must use the same source tree.
+- Phase 2 adaptive-suffix benchmark:
+  `python -m uv run python benchmarks/suffix_runtime.py --output experiments/phase2/<name>`
+  (config `configs/phase2-suffix.yaml`, prompts of its `source_run`). Then
+  `python -m uv run python benchmarks/suffix_report.py <run> --compare <second run>`.
+- Timing fields (`timings_ms`, `reference_ms`, `wall_ms`, `profile.json`) are recorded but
+  excluded from digests. Runs that are compared for reproducibility must use the same source
+  tree (`src`, `benchmarks`, `configs`; tests are not part of it).
 - Large raw record files are written as reproducible gzip (`*.jsonl.gz`, mtime 0);
   `read_jsonl` reads both forms. Digests are computed over the decoded records.
 
@@ -54,4 +59,13 @@
 - A runtime reads weight values only through a store. Bounds for the runtime's own
   arithmetic live in `awpmi.bounds` and are validated twice: against exact rational
   arithmetic in tests, and against float64 on every benchmark prompt.
+- Only the faithful rounding model may produce `certified=True` (decisions 0001 and 0005).
+  Experimental rounding models are run with `experimental=True` and recorded as
+  `would_certify`. A bound on a reference operation is validated three ways: the
+  reference's own kernels on every grid input of small enclosures (CPU and CUDA),
+  adversarial faithful realizations, and exact `Decimal`/`Fraction` arithmetic; then every
+  benchmark checks every intermediate's enclosure against the reference's values.
+- An exact path (prefix, suffix recomputation, fallback) runs the reference's own operations
+  with the reference's shapes (all positions), never a subset, so that it is bitwise equal
+  by determinism, and is checked bitwise on every prompt.
 - Decision-gate thresholds are fixed in config before a full run, not after seeing it.

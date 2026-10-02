@@ -232,16 +232,38 @@ def test_masked_fallback_guard_falls_back_when_the_masked_gemm_is_wrong(monkeypa
     assert tripped > 0
 
 
-def test_masked_mode_refuses_a_platform_that_fails_the_self_test(monkeypatch):
-    weight, _ = random_system("cpu", torch.bfloat16, seed=2)
+def test_masked_mode_runs_full_on_a_platform_that_fails_the_self_test(monkeypatch):
+    """Decision 0005: a failed self-test disables MASKED for the head; every fallback is then FULL."""
+    weight, hidden = system_with_a_winning_tie("cpu", torch.bfloat16, seed=2)
+    reference = reference_logits(weight, hidden)
     decomposition = RefinementDecomposition.build(weight, "q6+q4")
 
     def row_dependent_linear(inputs, matrix):
         return F.linear(inputs, matrix) + float((matrix == 0).all(dim=1).any())
 
     monkeypatch.setattr(refinement_head, "F", types.SimpleNamespace(linear=row_dependent_linear))
-    with pytest.raises(RuntimeError):
-        make_head(decomposition, FallbackMode.MASKED)
+    head = make_head(decomposition, FallbackMode.MASKED)
+    assert head.self_test["mismatches"] > 0 and not head.masked_enabled
+    fallbacks = 0
+    for b in range(hidden.shape[0]):
+        result = head.run(hidden[b], trace=True)
+        check_run(result, head, decomposition, reference[:, b])
+        if not result.certified:
+            assert result.fallback is FallbackMode.FULL and not result.masked_guard_tripped
+            fallbacks += 1
+    assert fallbacks > 0
+
+
+def test_masked_is_the_default_fallback_and_needs_its_self_test():
+    weight, _ = random_system("cpu", torch.bfloat16, seed=3)
+    decomposition = RefinementDecomposition.build(weight, "q6+q4")
+    store = PackedRefinementStore.from_decomposition(decomposition)
+    coarse = CoarseArithmetic(FP32_ACCUMULATION_UNIT_ROUNDOFF, weight.shape[1])
+    head = RefinementLMHead(store, numerics_for(weight), coarse)
+    assert head.fallback is FallbackMode.MASKED and head.masked_enabled and head.self_test["mismatches"] == 0
+    with pytest.raises(ValueError):
+        RefinementLMHead(store, numerics_for(weight), coarse, self_test_trials=0)
+    assert not RefinementLMHead(store, numerics_for(weight), coarse, fallback=FallbackMode.FULL).masked_enabled
 
 
 def test_runtime_rejects_mismatched_inputs():

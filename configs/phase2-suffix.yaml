@@ -1,0 +1,52 @@
+# AWPMI Phase 2: an adaptive suffix in the last MLP, ahead of the q6+q4 LM head (decision 0005).
+
+# The Phase 1A run whose prompts, model and reference numerics are reused.
+source_run: experiments/phase1/cs-column-baseline-run1
+
+# LM head: the Phase 1C runtime (decision 0004), with the fallback of decision 0005.
+decomposition: q6+q4
+tie_break: lowest_index
+# masked: the default; self-tested at start-up and guarded per call, otherwise full.
+lm_head_fallback: masked
+
+# Adaptive suffix depth (roadmap §2.1): lm_head (0), down = the final projection (1), mlp = the last MLP (2).
+stages: [lm_head, down, mlp]
+# Share of the suffix's neuron pages read before certifying (down: down_proj columns; mlp: up_proj
+# rows and down_proj columns, every gate_proj row being read), largest bound contribution first.
+budgets: [1.0, 0.95, 0.9, 0.8, 0.5]
+
+# Rounding models (decision 0005). Only faithful certifies; the others are what-ifs, recorded as
+# "would certify", never used for a decision.
+certified_assumptions: faithful
+experimental_assumptions: [nearest_even_elementwise, nearest_even]
+
+runtime:
+  # Unit roundoff assumed for the binary32 coarse pass and every fp32 accumulation: 2^-22.
+  coarse_unit_roundoff: 2.384185791015625e-07
+  chunk_rows: 8192
+  masked_self_test_trials: 16
+  # Rows that the LM-head pass on an enclosure of h may read into int4 and into the exact state; a
+  # wider pass stops and falls back (an efficiency rule: Phase 1C on the exact h reads at most 21,142
+  # and 15). It can turn a certificate into a fallback, never into a wrong token. This is the
+  # "limited" policy of every budget.
+  enclosure_row_limits: [32768, 256]
+  # The "unlimited" policy (no row limit) is also run at these budgets: the certificates' ceiling,
+  # whatever they cost to read.
+  ceiling_budgets: [1.0]
+
+timing:
+  # Prompts run once, unrecorded, before measuring.
+  warmup_prompts: 3
+
+# Phase 2 gate (roadmap), fixed before the full run. Correctness criteria are hard; the materialization
+# curves are recorded for every stage and budget. The adaptive region must extend beyond the LM head:
+# at least `min_certified_with_unread_suffix` certified decisions (certified model) with some page of
+# the suffix unread.
+gate:
+  min_certified_with_unread_suffix: 1
+
+# Research decision, fixed before the full run (not part of the gate). A stage is BENEFICIAL if, at its
+# best budget, the mean effective bytes of the certified runtime are below those of reading the whole
+# suffix and running Phase 1C on the exact h, by at least this share of the adaptive region's BF16 bytes.
+decision:
+  min_mean_saving_fraction: 0.01

@@ -1,0 +1,10 @@
+{
+  "store_sha256": "964d10ab12a058c8c247e75763b0f7b8503d44e59a4c8672b0a2a5f78bd72e83",
+  "reference_sha256": "4b2f25236454554b3431dfb2d598783b1498568c4d7b731373440639e081ae19",
+  "validation_sha256": "1e3b3fde2398d9a0f38cdb96343307f9630c90ccea332f1057ecd86d745594a9",
+  "records_sha256": "3f8186a4d46a17bfb047539ebed6d2f2ae4109dd9edc2f50d06e973bb50a2253",
+  "excluded_fields": [
+    "wall_ms",
+    "timings_ms"
+  ]
+}

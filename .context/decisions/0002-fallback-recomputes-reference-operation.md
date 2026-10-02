@@ -27,6 +27,12 @@ tolerance.
 same operation with the full shape on the surviving rows only. That mode relies on the
 GEMM's row independence, and it is self-tested, guarded and evidenced.
 
+**Extended in decision 0005.** MASKED is now the default. A failed start-up self-test makes
+the head run FULL for every fallback, and a tripped guard makes that call run FULL. FULL
+stays the canonical correctness fallback. A Phase 2 fallback first recomputes the adaptive
+suffix with the reference's own operations and shapes (bitwise), then runs this fallback
+logic on the exact LM-head input.
+
 ## Rejected
 
 - *Taking argmax of the float64 page-accumulated logits as the fallback.* It can

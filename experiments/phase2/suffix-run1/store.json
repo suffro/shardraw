@@ -1,0 +1,51 @@
+{
+  "lm_head": {
+    "decomposition": "q6+q4",
+    "storage_bytes": {
+      "levels": 35782656,
+      "original": 56623104,
+      "metadata": 786432,
+      "total": 93192192
+    },
+    "weight_bytes": 56623104,
+    "metadata_bytes": 786432,
+    "store_sha256": "f127e092ec47ecae66c1b71024cfa298a2cb5012cab97cf343d14fe3274bd755",
+    "fallback": "masked",
+    "masked_fallback_self_test": {
+      "trials": 16,
+      "mismatches": 0
+    },
+    "masked_enabled": true
+  },
+  "suffix": {
+    "down": {
+      "adaptive_roles": [
+        "down"
+      ],
+      "layer": 29,
+      "pages": 1536,
+      "page_bytes": 1152,
+      "weight_bytes": 1769472,
+      "metadata_bytes": 10752,
+      "resident_bytes": 1152,
+      "region_bytes": 58392576,
+      "store_sha256": "21f7bff8ab8fe43fa5fe66b028aaf9e26f7d3a6b6dd9a6b6bcc05530d73c66fc"
+    },
+    "mlp": {
+      "adaptive_roles": [
+        "gate",
+        "up",
+        "down"
+      ],
+      "layer": 29,
+      "pages": 4608,
+      "page_bytes": 1152,
+      "weight_bytes": 5308416,
+      "metadata_bytes": 16896,
+      "resident_bytes": 1152,
+      "region_bytes": 61931520,
+      "store_sha256": "21f7bff8ab8fe43fa5fe66b028aaf9e26f7d3a6b6dd9a6b6bcc05530d73c66fc"
+    }
+  },
+  "final_norm_sha256": "b1c3b88d13d30d192c39ca32dfc07aa9f333844fccae2e5b34d3f3572dd6c5f4"
+}

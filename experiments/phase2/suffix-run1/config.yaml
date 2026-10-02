@@ -1,0 +1,33 @@
+source_run: experiments/phase1/cs-column-baseline-run1
+decomposition: q6+q4
+tie_break: lowest_index
+lm_head_fallback: masked
+stages:
+- lm_head
+- down
+- mlp
+budgets:
+- 1.0
+- 0.95
+- 0.9
+- 0.8
+- 0.5
+certified_assumptions: faithful
+experimental_assumptions:
+- nearest_even_elementwise
+- nearest_even
+runtime:
+  coarse_unit_roundoff: 2.384185791015625e-07
+  chunk_rows: 8192
+  masked_self_test_trials: 16
+  enclosure_row_limits:
+  - 32768
+  - 256
+  ceiling_budgets:
+  - 1.0
+timing:
+  warmup_prompts: 3
+gate:
+  min_certified_with_unread_suffix: 1
+decision:
+  min_mean_saving_fraction: 0.01

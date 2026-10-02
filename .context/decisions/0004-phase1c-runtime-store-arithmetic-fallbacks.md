@@ -57,7 +57,8 @@ The last two are the two levers Phase 1B left for its 9.6% of fallbacks.
    - Both are hard failures.
 5. **FULL fallback stays the default.** It reads every unread BF16 row and applies the
    reference `F.linear`, bitwise, as in decision 0002. The gate and the primary numbers
-   use it.
+   use it. (Superseded from Phase 2 on by decision 0005: MASKED is the default, FULL the
+   canonical fallback behind it.)
 6. **MASKED fallback is adopted as an opt-in runtime mode** (`FallbackMode.MASKED`).
    - What it does: a full-shape `F.linear` on the surviving rows, with zeros elsewhere,
      and the argmax taken over the survivors. The survivors' rows were already read in
@@ -116,4 +117,5 @@ The last two are the two levers Phase 1B left for its 9.6% of fallbacks.
 - *A compact exact remainder* instead of the original rows. Only 1.4 rows per input
   reach the exact state, so it would save almost nothing.
 - *Making MASKED the default.* Its assumption is evidenced and guarded, but not proven.
-  The user should make that call.
+  The user should make that call. **The user made it for Phase 2 (decision 0005):** MASKED
+  is the default, with its self-test and guard, and FULL runs whenever either fails.

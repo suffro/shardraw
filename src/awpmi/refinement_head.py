@@ -17,14 +17,27 @@ through the `PackedRefinementStore`, which counts every byte.
 
 Fallbacks (`FallbackMode`):
 
+  MASKED  the default (decision 0005). Apply F.linear(h, W') with the full shape, where
+          W' keeps the surviving rows (already read in the exact state) and zeros
+          elsewhere, and take the argmax over the survivors. It assumes that each
+          output row of the reference GEMM depends only on its own weight row:
+          verified by a mandatory self-test on the platform when the head is built,
+          and guarded per call by checking that every surviving logit lies in its
+          certified interval. If the self-test fails, the head runs FULL for every
+          fallback; if the guard trips, that call runs FULL.
   FULL    read every original row not read yet and apply F.linear(h, W): the
-          reference operation, bitwise (decision 0002).
-  MASKED  apply F.linear(h, W') with the full shape, where W' keeps the surviving rows
-          (already read in the exact state) and zeros elsewhere, and take the argmax
-          over the survivors. It assumes that each output row of the reference GEMM
-          depends only on its own weight row: verified by a self-test on the platform
-          when the head is built, and guarded per call by checking that every
-          surviving logit lies in its certified interval (otherwise FULL runs).
+          reference operation, bitwise (decision 0002). The canonical correctness
+          fallback, always available.
+
+Phase 2 (decision 0005) adds two things, without changing a run on an exact input:
+
+  * `run_enclosure`: the same states for an *enclosure* of h (an adaptive suffix only
+    bounds it). With centre c and radius ρ, every state adds the input's spread |L_j|·ρ
+    to its radius and bounds absolute masses with |c| + ρ. The coarse pass computes
+    S = q·c and T = |q|·ρ in binary32 with the same error model. A pass that stays
+    UNKNOWN after the exact state ends there: no LM-head fallback runs on an enclosure.
+  * `HeldReads`: one token's passes share what they read, so a row is read (and
+    counted) once per token even when a later pass on the exact h needs it again.
 """
 
 from __future__ import annotations
@@ -37,7 +50,9 @@ import torch
 import torch.nn.functional as F
 
 from awpmi.bounds.coarse import CoarseArithmetic, coarse_error_bound, coarse_radius, coded_mass_bound
-from awpmi.bounds.linear import absolute_mass_upper
+from awpmi.bounds.enclosure import Enclosure
+from awpmi.bounds.floating import next_up, round_up_to_grid
+from awpmi.bounds.linear import absolute_mass_upper, l1_norm_upper
 from awpmi.bounds.remainder import RowNormBounds, input_norms, remainder_mass_bound
 from awpmi.bounds.residual import ReferenceNumerics, exact_radius, reference_logit_interval, remainder_radius
 from awpmi.certificate import TieBreak, certify_columns, contenders
@@ -98,18 +113,82 @@ class RefinementRunResult:
     trace: RunTrace | None
 
 
-def coarse_matvec(payload: torch.Tensor, layout: CodeLayout, vector: torch.Tensor, chunk_rows: int) -> torch.Tensor:
+@dataclass(frozen=True)
+class EnclosureRunResult:
+    """One pass on an enclosure of h: certified, or what is left after the exact state."""
+
+    certified: bool
+    token_id: int  # the certified winner, or -1
+    reason: str | None  # None, "uncertified" (after the exact state), "too_wide" (a row limit) or "coarse_overflow"
+    decision_state: int | None
+    winner: int
+    competitor: int
+    certificate_margin: float
+    contenders: tuple[int, ...]
+    rows_loaded: tuple[int, ...]
+    alive: torch.Tensor | None  # rows that may still be the reference argmax
+    lower: torch.Tensor | None
+    upper: torch.Tensor | None
+    exact_rows: torch.Tensor | None  # rows read into the exact state by this pass, and their original values
+    exact_weight: torch.Tensor | None
+    trace: RunTrace | None
+
+
+class _RowCache:
+    """Rows of one state that this token has already read, with their data."""
+
+    def __init__(self, rows: int, device: torch.device) -> None:
+        self.position = torch.full((rows,), -1, dtype=torch.long, device=device)
+        self.data: tuple[torch.Tensor, ...] | None = None
+
+    @property
+    def held(self) -> torch.Tensor:
+        return self.position >= 0
+
+    def missing(self, rows: torch.Tensor) -> torch.Tensor:
+        return rows[self.position[rows] < 0]
+
+    def add(self, rows: torch.Tensor, *tensors: torch.Tensor) -> None:
+        start = 0 if self.data is None else self.data[0].shape[0]
+        self.position[rows] = torch.arange(start, start + rows.numel(), device=rows.device)
+        self.data = tensors if self.data is None else tuple(torch.cat([old, new]) for old, new in zip(self.data, tensors))
+
+    def gather(self, rows: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        index = self.position[rows]
+        return tuple(tensor.index_select(0, index) for tensor in self.data)
+
+
+class HeldReads:
+    """What one token has read from the store so far, shared by its passes."""
+
+    def __init__(self, store: PackedRefinementStore) -> None:
+        self.base: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.levels = {level: _RowCache(store.out_features, store.device) for level in range(1, store.num_levels)}
+        self.exact = _RowCache(store.out_features, store.device)
+
+
+def coarse_matvec(
+    payload: torch.Tensor,
+    layout: CodeLayout,
+    vector: torch.Tensor,
+    chunk_rows: int,
+    absolute_vector: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """fl₃₂(Σ_k q_jk·v_k) for every packed row, decoding `chunk_rows` rows at a time (float32 [V]).
 
+    With `absolute_vector` ρ, also fl₃₂(Σ_k |q_jk|·ρ_k) from the same decoded chunk.
     The error model is `awpmi.bounds.coarse`; only binary32 arithmetic is used.
     """
-    if vector.dtype != torch.float32:
+    if vector.dtype != torch.float32 or (absolute_vector is not None and absolute_vector.dtype != torch.float32):
         raise TypeError("the coarse pass runs in float32")
     out = torch.empty(payload.shape[0], dtype=torch.float32, device=payload.device)
+    spread = None if absolute_vector is None else torch.empty_like(out)
     for start in range(0, payload.shape[0], chunk_rows):
-        codes = layout.unpack(payload[start : start + chunk_rows])
-        out[start : start + chunk_rows] = torch.mv(codes.to(torch.float32), vector)
-    return out
+        codes = layout.unpack(payload[start : start + chunk_rows]).to(torch.float32)
+        out[start : start + chunk_rows] = torch.mv(codes, vector)
+        if spread is not None:
+            spread[start : start + chunk_rows] = torch.mv(codes.abs(), absolute_vector)
+    return out if spread is None else (out, spread)
 
 
 def masked_fallback_self_test(store: PackedRefinementStore, trials: int = 8, seed: int = 0) -> dict[str, int]:
@@ -147,7 +226,7 @@ class RefinementLMHead:
         numerics: ReferenceNumerics,
         coarse: CoarseArithmetic,
         tie_break: TieBreak = TieBreak.LOWEST_INDEX,
-        fallback: FallbackMode = FallbackMode.FULL,
+        fallback: FallbackMode = FallbackMode.MASKED,
         chunk_rows: int = DEFAULT_CHUNK_ROWS,
         self_test_trials: int = 8,
     ) -> None:
@@ -167,10 +246,13 @@ class RefinementLMHead:
             CodeLayout(store.level_bits(level), store.in_features, store.device) for level in range(store.num_levels)
         ]
         self.self_test: dict[str, int] | None = None
+        # Whether a fallback may try MASKED first: requested, and the platform passed the self-test.
+        self.masked_enabled = False
         if fallback is FallbackMode.MASKED:
+            if self_test_trials <= 0:
+                raise ValueError("the masked fallback needs its platform self-test")
             self.self_test = masked_fallback_self_test(store, self_test_trials)
-            if self.self_test["mismatches"]:
-                raise RuntimeError(f"masked fallback failed its platform self-test: {self.self_test}")
+            self.masked_enabled = self.self_test["mismatches"] == 0
 
     def _vector(self, hidden: torch.Tensor) -> torch.Tensor:
         if hidden.dtype != self.store.dtype:
@@ -179,21 +261,64 @@ class RefinementLMHead:
             raise ValueError("hidden state must be a single position")
         return hidden.reshape(-1).contiguous()
 
-    def run(self, hidden: torch.Tensor, timer: StageTimer | None = None, trace: bool = False) -> RefinementRunResult:
-        """`hidden` is the exact LM-head input of one position (any shape with in_features elements)."""
-        return _Run(self, hidden, timer or NullTimer(), trace).execute()
+    def begin_token(self) -> HeldReads:
+        """Start one token's read log, for passes that share it (`run(..., held=)`, `run_enclosure`)."""
+        self.store.begin_run()
+        return HeldReads(self.store)
+
+    def run(
+        self,
+        hidden: torch.Tensor,
+        timer: StageTimer | None = None,
+        trace: bool = False,
+        held: HeldReads | None = None,
+    ) -> RefinementRunResult:
+        """`hidden` is the exact LM-head input of one position (any shape with in_features elements).
+
+        Without `held` this is one complete token (Phase 1C). With it, the pass continues a
+        token started by `begin_token`: rows already held are not read again, and the
+        store's log and the timer are not reset.
+        """
+        return _Run(self, hidden, timer or NullTimer(), trace, held).execute()
+
+    def run_enclosure(
+        self,
+        enclosure: Enclosure,
+        held: HeldReads,
+        timer: StageTimer | None = None,
+        trace: bool = False,
+        row_limits: tuple[int, ...] | None = None,
+    ) -> EnclosureRunResult:
+        """The same states for an enclosure of h; stops UNKNOWN after the exact state (no fallback).
+
+        `row_limits[s - 1]` caps the rows that may enter state s ≥ 1: a wider pass stops
+        before reading them ("too_wide"). The limits save reads: they can turn a
+        certificate into a fallback, never into a wrong token.
+        """
+        if enclosure.lower.numel() != self.store.in_features:
+            raise ValueError("the enclosure must cover one position of the hidden dimension")
+        if row_limits is not None and len(row_limits) != self.store.num_states - 1:
+            raise ValueError("one row limit per state after the coarse one")
+        run = _Run(self, enclosure, timer or NullTimer(), trace, held)
+        run.row_limits = row_limits
+        return run.execute_enclosure()
 
 
 class _Run:
-    """State of one `RefinementLMHead.run` call."""
+    """State of one pass (`RefinementLMHead.run` or `run_enclosure`)."""
 
-    def __init__(self, head: RefinementLMHead, hidden: torch.Tensor, timer, trace: bool) -> None:
+    def __init__(self, head: RefinementLMHead, source, timer, trace: bool, held: HeldReads | None) -> None:
         self.head = head
         self.store = head.store
         self.numerics = head.numerics
         self.timer = timer
         self.trace = trace
-        self.vector = head._vector(hidden)
+        self.fresh = held is None
+        self.held = held if held is not None else HeldReads(head.store)
+        if isinstance(source, Enclosure):
+            self.enclosure, self.vector = source, None
+        else:
+            self.enclosure, self.vector = None, head._vector(source)
         rows = self.store.out_features
         self.rows_loaded = [0] * self.store.num_states
         self.contender_counts: list[int] = []
@@ -205,10 +330,16 @@ class _Run:
         self.coarse_sum = self.coarse_error = None
         self.running_center = torch.zeros(rows, dtype=torch.float64, device=self.store.device)
         self.running_mass = torch.zeros_like(self.running_center)
+        self.running_spread = torch.zeros_like(self.running_center) if self.enclosure is not None else None
+        self.row_limits: tuple[int, ...] | None = None
+        self.too_wide = False
+
+    # Passes
 
     def execute(self) -> RefinementRunResult:
-        self.store.begin_run()
-        self.timer.start()
+        if self.fresh:
+            self.store.begin_run()
+            self.timer.start()
         if not bool(torch.isfinite(self.vector).all()):
             return self._fallback("nonfinite_input", certificate=None)
         self.inputs = input_norms(self.vector)
@@ -216,19 +347,46 @@ class _Run:
         self.timer.mark("input")
         if not self._coarse_state():
             return self._fallback("coarse_overflow", certificate=None)
+        certificate, state = self._refine()
+        if certificate is not None:
+            return self._result(certificate, decision_state=state)
+        return self._fallback("uncertified", certificate=self._last_certificate)
+
+    def execute_enclosure(self) -> EnclosureRunResult:
+        enclosure = self.enclosure
+        if not enclosure.finite:
+            return self._enclosure_result(None, None, "coarse_overflow")
+        self.center32 = enclosure.center.to(torch.float32)
+        self.vector64 = self.center32.to(torch.float64)
+        self.rho = enclosure.radius_about(self.vector64)
+        self.magnitude = next_up(self.vector64.abs() + self.rho)
+        self.inputs = input_norms(self.magnitude)
+        self.timer.mark("input")
+        if not self._coarse_state():
+            return self._enclosure_result(None, None, "coarse_overflow")
+        certificate, state = self._refine()
+        if certificate is not None:
+            return self._enclosure_result(certificate, state, None)
+        return self._enclosure_result(self._last_certificate, None, "too_wide" if self.too_wide else "uncertified")
+
+    def _refine(self):
+        """Certificate → elimination → next state, up to the exact state. Returns (certificate, state) if certified."""
         state = 0
         while True:
             certificate = certify_columns(self.lower, self.upper, self.head.tie_break)
             self.alive = contenders(self.lower, self.upper, self.head.tie_break)
-            certified = bool(certificate.certified)
             self.contender_counts.append(int(self.alive.sum()))
             self.timer.mark(f"{state}:certify")
-            if certified:
-                return self._result(certificate, decision_state=state)
+            if bool(certificate.certified):
+                return certificate, state
             if state == self.store.exact_state:
-                return self._fallback("uncertified", certificate=certificate)
+                self._last_certificate = certificate
+                return None, state
             state += 1
             rows = self.alive.nonzero().squeeze(1)
+            if self.row_limits is not None and rows.numel() > self.row_limits[state - 1]:
+                self._last_certificate, self.too_wide = certificate, True
+                return None, state - 1
             if state == self.store.exact_state:
                 center, radius = self._exact_state(rows)
             else:
@@ -236,19 +394,55 @@ class _Run:
             self._tighten(state, rows, center, radius)
             self.timer.mark(f"{state}:{'exact' if state == self.store.exact_state else 'refine'}")
 
+    # Reads (each row of each state at most once per token)
+
+    def _base(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.held.base is None:
+            self.held.base = self.store.read_level(0)
+        return self.held.base
+
+    def _level(self, level: int, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = self.held.levels[level]
+        missing = cache.missing(rows)
+        if missing.numel():
+            cache.add(missing, *self.store.read_level(level, missing))
+        return cache.gather(rows)
+
+    def _exact(self, rows: torch.Tensor) -> torch.Tensor:
+        cache = self.held.exact
+        missing = cache.missing(rows)
+        if missing.numel():
+            cache.add(missing, self.store.read_exact(missing))
+        return cache.gather(rows)[0]
+
     # States
 
     def _coarse_state(self) -> bool:
-        payload, scales = self.store.read_level(0)
+        payload, scales = self._base()
         layout = self.head._layouts[0]
-        coarse_sum = coarse_matvec(payload, layout, self.vector.to(torch.float32), self.head.chunk_rows)
+        if self.enclosure is None:
+            coarse_sum = coarse_matvec(payload, layout, self.vector.to(torch.float32), self.head.chunk_rows)
+            spread_sum = None
+        else:
+            rho32 = round_up_to_grid(self.rho, torch.float32).to(torch.float32)
+            coarse_sum, spread_sum = coarse_matvec(payload, layout, self.center32, self.head.chunk_rows, rho32)
         self.timer.mark("0:matvec")
-        if not bool(torch.isfinite(coarse_sum).all()):
+        if not bool(torch.isfinite(coarse_sum).all()) or (spread_sum is not None and not bool(torch.isfinite(spread_sum).all())):
             return False
         self.coarse_payload, self.coarse_scales = payload, scales
         center = coarse_sum.to(torch.float64) * scales.to(torch.float64)  # exact: 24 × 24 bits
         mass = coded_mass_bound(scales, layout.limit, self.inputs.l1)
-        error = coarse_error_bound(scales, mass, layout.limit, self.head.coarse)
+        if spread_sum is None:
+            error = coarse_error_bound(scales, mass, layout.limit, self.head.coarse)
+        else:
+            # The binary32 error of S = q·c uses the centre's mass; T = |q|·ρ errs by γ·limit·‖ρ‖₁ + τ.
+            center_mass = coded_mass_bound(scales, layout.limit, l1_norm_upper(self.center32))
+            error = coarse_error_bound(scales, center_mass, layout.limit, self.head.coarse)
+            slack = self.head.coarse.gamma * layout.limit * float(l1_norm_upper(rho32)) + self.head.coarse.underflow(
+                layout.limit
+            )
+            spread = next_up(scales.to(torch.float64) * next_up(spread_sum.to(torch.float64) + slack))
+            error = error + spread
         miss = remainder_mass_bound(self.store.remainder_norms(0), self.inputs)
         radius = coarse_radius(mass, miss, error, self.numerics)
         self.lower, self.upper = reference_logit_interval(center, radius, self.numerics.output_dtype)
@@ -265,28 +459,39 @@ class _Run:
 
     def _refinement_state(self, state: int, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Levels 0..state for `rows`, accumulated in float64 as in the oracle."""
+        weights = self.vector64 if self.enclosure is None else self.magnitude
         if state == 1:
             # The base level of every row is already in hand: recompute these rows exactly.
             base = self._level_values(
                 0, self.coarse_payload.index_select(0, rows), self.coarse_scales.index_select(0, rows)
             )
             self.running_center[rows] = base @ self.vector64
-            self.running_mass[rows] = absolute_mass_upper(base, self.vector64)
-        payload, scales = self.store.read_level(state, rows)
+            self.running_mass[rows] = absolute_mass_upper(base, weights)
+            if self.enclosure is not None:
+                self.running_spread[rows] = absolute_mass_upper(base, self.rho)
+        payload, scales = self._level(state, rows)
         values = self._level_values(state, payload, scales)
         center = self.running_center[rows] + values @ self.vector64
-        mass = self.running_mass[rows] + absolute_mass_upper(values, self.vector64)
+        mass = self.running_mass[rows] + absolute_mass_upper(values, weights)
         self.running_center[rows], self.running_mass[rows] = center, mass
         norms = self.store.remainder_norms(state)
         miss = remainder_mass_bound(RowNormBounds(norms.l2[rows], norms.linf[rows]), self.inputs)
         reference_mass = mass + miss
-        return center, remainder_radius(miss, reference_mass, reference_mass, self.numerics)
+        radius = remainder_radius(miss, reference_mass, reference_mass, self.numerics)
+        if self.enclosure is not None:
+            spread = self.running_spread[rows] + absolute_mass_upper(values, self.rho)
+            self.running_spread[rows] = spread
+            radius = radius + spread
+        return center, radius
 
     def _exact_state(self, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        weight = self.store.read_exact(rows)
+        weight = self._exact(rows)
         self.exact_rows, self.exact_weight = rows, weight
         values = weight.to(torch.float64)
-        return values @ self.vector64, exact_radius(absolute_mass_upper(values, self.vector64), self.numerics)
+        if self.enclosure is None:
+            return values @ self.vector64, exact_radius(absolute_mass_upper(values, self.vector64), self.numerics)
+        radius = absolute_mass_upper(values, self.rho) + exact_radius(absolute_mass_upper(values, self.magnitude), self.numerics)
+        return values @ self.vector64, radius
 
     def _tighten(self, state: int, rows: torch.Tensor, center: torch.Tensor, radius: torch.Tensor) -> None:
         lower, upper = reference_logit_interval(center, radius, self.numerics.output_dtype)
@@ -301,7 +506,7 @@ class _Run:
     def _fallback(self, reason: str, certificate) -> RefinementRunResult:
         reference_input = self.vector.view(1, 1, -1)
         guard_tripped = False
-        if self.head.fallback is FallbackMode.MASKED and reason == "uncertified":
+        if self.head.masked_enabled and reason == "uncertified":
             token, logits = self._masked(reference_input)
             if token is not None:
                 self.timer.mark("fallback")
@@ -330,17 +535,23 @@ class _Run:
 
     def _full(self, reference_input: torch.Tensor) -> tuple[int, torch.Tensor]:
         """Read every original row not read yet and apply the reference operation (decision 0002)."""
-        rows = self.store.out_features
-        unread = torch.ones(rows, dtype=torch.bool, device=self.store.device)
-        if self.exact_rows is not None:
-            unread[self.exact_rows] = False
-        missing = unread.nonzero().squeeze(1)
-        weight = torch.empty(rows, self.store.in_features, dtype=self.store.dtype, device=self.store.device)
+        cache = self.held.exact
+        held = cache.held
+        missing = (~held).nonzero().squeeze(1)
+        weight = torch.empty(
+            self.store.out_features, self.store.in_features, dtype=self.store.dtype, device=self.store.device
+        )
         weight.index_copy_(0, missing, self.store.read_fallback(missing))
-        if self.exact_rows is not None:
-            weight.index_copy_(0, self.exact_rows, self.exact_weight)
+        if bool(held.any()):
+            rows = held.nonzero().squeeze(1)
+            weight.index_copy_(0, rows, cache.gather(rows)[0])
         logits = F.linear(reference_input, weight).reshape(-1)
         return int(torch.argmax(logits)), logits
+
+    def _trace(self) -> RunTrace | None:
+        if self.trace and self.lower is not None:
+            return RunTrace(self.coarse_sum, self.coarse_error, tuple(self.states), self.lower, self.upper, self.alive)
+        return None
 
     def _result(
         self,
@@ -357,11 +568,6 @@ class _Run:
             margin = float(certificate.margin)
         else:
             winner, competitor, margin = -1, -1, -math.inf
-        run_trace = None
-        if self.trace and self.lower is not None:
-            run_trace = RunTrace(
-                self.coarse_sum, self.coarse_error, tuple(self.states), self.lower, self.upper, self.alive
-            )
         return RefinementRunResult(
             token_id=winner if fallback is None else token,
             certified=fallback is None,
@@ -378,5 +584,29 @@ class _Run:
             reads=self.store.reads,
             fallback_logits=logits,
             timings_ms=dict(self.timer.stages),
-            trace=run_trace,
+            trace=self._trace(),
+        )
+
+    def _enclosure_result(self, certificate, decision_state: int | None, reason: str | None) -> EnclosureRunResult:
+        certified = reason is None
+        if certificate is not None:
+            winner, competitor, margin = int(certificate.winner), int(certificate.competitor), float(certificate.margin)
+        else:
+            winner, competitor, margin = -1, -1, -math.inf
+        return EnclosureRunResult(
+            certified=certified,
+            token_id=winner if certified else -1,
+            reason=reason,
+            decision_state=decision_state,
+            winner=winner,
+            competitor=competitor,
+            certificate_margin=margin,
+            contenders=tuple(self.contender_counts),
+            rows_loaded=tuple(self.rows_loaded),
+            alive=self.alive,
+            lower=self.lower,
+            upper=self.upper,
+            exact_rows=self.exact_rows,
+            exact_weight=self.exact_weight,
+            trace=self._trace(),
         )

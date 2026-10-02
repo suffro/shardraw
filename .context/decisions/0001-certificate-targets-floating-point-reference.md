@@ -42,7 +42,9 @@ Bounds on the exact product `W h` are therefore not enough:
    faithful rounding is monotone, so this holds whatever rounding mode the backend
    uses. **Re-examined in decision 0004:** a probe found round-to-nearest-even on this
    platform, which would certify 85 of Phase 1C's 96 fallbacks. The faithful model is
-   kept.
+   kept. **Confirmed in decision 0005 (Phase 2):** the faithful model is the certified one
+   for every rounding of the adaptive suffix too (GEMM epilogues and elementwise kernels);
+   round-to-nearest-even is an experimental what-if that never certifies.
 4. **A strict certificate**, exactly as the roadmap states it. Strict separation of
    the grid-rounded bounds implies a unique reference maximum, so tie-breaking
    never matters.
