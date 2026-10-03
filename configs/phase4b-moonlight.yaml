@@ -1,0 +1,118 @@
+# AWPMI Phase 4B: Moonlight-16B-A3B out of VRAM and out of host RAM, exact (decision 0008).
+
+model:
+  # Moonlight-16B-A3B (MIT): DeepSeek-V3's architecture (DeepseekV3ForCausalLM: MLA attention, sigmoid noaux_tc router
+  # with a float32 correction bias, shared experts) at 16 B parameters. 27 layers: layer 0 dense, layers 1-26 with 64
+  # routed experts (6 per token) and 2 shared experts. Routed experts: 28.8 GB of BF16, stored as three tensors per
+  # expert, read in place through a composed-segment index. The whole checkpoint (31.9 GB) does not fit this machine's
+  # 32 GB of RAM next to the OS.
+  repository: moonshotai/Moonlight-16B-A3B
+  revision: 476b36a473d4467f94469414bef6cee75c9c8172
+  dtype: bfloat16
+  adapter: moonlight          # awpmi.models.moonlight: checked layout, routers, shared experts, routing configuration
+  # The official tokenizer (tiktoken, remote code tokenization_moonshot.py, reviewed) at the same pinned revision.
+  tokenizer_revision: 476b36a473d4467f94469414bef6cee75c9c8172
+  trust_remote_code_tokenizer: true
+
+prompts:
+  # wikitext-2 test paragraphs: from a drawn starting line, consecutive lines joined until the target length, cut to it.
+  dataset:
+    repository: Salesforce/wikitext
+    revision: b08601e04326c79dfdd32d625aee71d232d685c3
+    file: wikitext-2-raw-v1/test-00000-of-00001.parquet
+    text_column: text
+  seed: 4
+  # Short to medium prefills, twice each.
+  lengths: [16, 32, 64, 128, 256, 512, 768, 1024, 16, 32, 64, 128, 256, 512, 768, 1024]
+  decode_steps: 8             # greedy tokens after the prompt, with the KV cache
+
+index:
+  directory: packs/moonlight-16b-a3b-expert-index
+
+storage:
+  alignment: 4096
+  max_gap: 0
+  workers: 8
+  max_read_bytes: 1048576
+  max_extent_bytes: 8388608
+  slot_bytes: 33554432        # 32 MiB staging slots (Phase 4A); an expert is 16.5 MiB
+  slots: 2
+
+# The streamed process runs under this device-memory cap (torch's allocator limit): Gate A. The routed experts are 4.8x it.
+gpu_budget_bytes: 6000000000
+
+# Expert buffers of one experts call (decision 0008): a call whose routed experts need more is run in chunks of consecutive
+# experts that fit. 256 MiB holds 15 experts of 16.5 MiB (a layer is 64): decode calls (6 experts) fit unchunked, prefills
+# that route more than 15 experts of a layer run in chunks. Gate C.
+call_budget_bytes: 268435456
+
+reference:
+  # The independent streaming reference (awpmi.streaming_reference) runs in its own process, without a device cap. The
+  # first prompts also run with this experts layer kept resident after its first load: results must not change.
+  residency_check_layers: [1]
+  residency_check_prompts: 2
+
+# Every configuration serves the routed experts from the drive; a cache persists across the prompts of its configuration
+# and starts empty. cache_experts: the device cache's budget in whole experts (16.5 MiB each). After the non-expert weights
+# (3.21 GB on the device, shared experts included) the cap leaves 2.6 GiB, from which a 1,024-token prefill's working
+# buffers (0.6 GiB with the call budget) and the cache pool's fragmentation (rows of 11 and 5.5 MiB: about 0.4 GiB reserved
+# beyond the cache's bytes) must come. Measured in development: 120 experts ran out of the cap, 96 peaked 10 MiB below it,
+# 80 peaks at 5.27 of 5.59 GiB reserved. So: 40 (small) and 80 (medium) experts, 2.4% and 4.8% of the 1,664 experts, against
+# 156 expert loads per decode token.
+configurations:
+  - {name: stream, cache_experts: 0, per_assignment_prompts: all}
+  # Gate E: the same calls with one compact buffer each (a prefill holds a whole layer, 1.1 GB) and with one expert per chunk.
+  - {name: compact, cache_experts: 0, call_budget_bytes: null, num_prompts: 8, per_assignment_prompts: all}
+  - {name: chunk-1, cache_experts: 0, call_budget_experts: 1, num_prompts: 4, per_assignment_prompts: all}
+  - {name: lru-40, cache_experts: 40, policy: lru}
+  - {name: lru-80, cache_experts: 80, policy: lru}
+  - {name: hotness-80, cache_experts: 80, policy: hotness}
+  # The shared experts (0.9 GB, every token uses them) served from the drive at every call instead of resident: the measured
+  # cost of not keeping them (awpmi.models.streamed).
+  - {name: shared-streamed, cache_experts: 0, stream_shared: true, num_prompts: 4}
+  # Dense streaming (every expert of every layer for every forward, in chunks): what a full-experts-per-step stream reads.
+  - {name: all-experts, all_experts: true, num_prompts: 2, decode_steps: 2}
+
+hotness_half_life: 1024
+poison_prompts: 3             # the first prompts of the first configuration add NaN spare slots and NaN-filled chunks
+record_ranges_prompts: 3      # raw physical-I/O traces (every extent read) for the first prompts of each configuration
+per_assignment_prompts: 2     # chunked calls' per-(token, expert) outputs checked (by rereading their experts) on the first prompts
+
+timing:
+  settle_seconds: 3
+  warmup_prompts: 1
+
+# Gates, fixed before the full runs (benchmarks/moonlight_report.py evaluates them).
+gate:
+  # Correctness, on every step of every configuration, prefill and decode: the token, the logits, the whole KV cache and the
+  # routed experts; per layer the attention output, the router's logits, scores, chosen experts and weights, the experts
+  # call's inputs and output, the shared experts' output and the MoE block's output; every (token, expert) output where
+  # checked (every unchunked call; chunked calls on the configured prompts); all equal to the reference's. Every step's
+  # storage and buffer audit holds. Also: the source files' sha256 equal the Hub's, every expert row of the index equals the
+  # reference's, and the residency check agrees on every step.
+  #
+  # A (out of VRAM): the routed expert bytes are at least this many times the device-memory cap, and every configuration
+  # completes under the cap.
+  min_expert_bytes_over_cap: 4.0
+  #
+  # B (out of RAM): in both processes (streamed and reference) the peak working set (physical host memory) and the peak host
+  # commit stay below this fraction of the routed expert bytes; no process holds all experts in host memory. The host commit
+  # is the private bytes minus the device memory torch's allocator holds: under Windows' WDDM driver model every byte of
+  # device memory is charged to the process's commit (measured in development: +2 GiB on the device, +2.15 GB of private
+  # bytes, the working set unchanged). Private bytes themselves are reported.
+  max_host_fraction_of_experts: 0.25
+  #
+  # C (bounded prefill): with a call budget, every call's expert buffers stay within it (and so below one layer), prefill
+  # included; the expert working set stays within the cache's capacity plus the budget.
+  max_compact_fraction_of_layer: 0.25
+  #
+  # D (selective physical I/O): per decode token without a cache, drive bytes at most this fraction of all routed expert bytes
+  # (6 of 64 experts per layer is 0.094), and below this fraction of what the all-experts stream reads per step.
+  max_decode_drive_fraction_without_cache: 0.11
+  max_decode_drive_ratio_to_all_experts: 0.12
+  #
+  # E (exact chunking): the compact (one buffer per call) and chunk-1 (one expert per chunk) configurations equal the
+  # reference on every step, like every other configuration.
+  #
+  # F (generic architecture): tests/test_layering.py passes (the core names no model, tensor layout, router or shared
+  # experts, and imports nothing above it; the streaming reference imports nothing of Shardraw's path).

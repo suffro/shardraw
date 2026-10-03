@@ -52,6 +52,15 @@ headers alone. A compact experts call holds only the routed experts on the GPU. 
 reproduces the fully materialized reference bit for bit: tokens, logits, routing, every expert
 output and the KV cache.
 
+**Phase 4B — out of VRAM and out of host RAM** runs Moonlight-16B-A3B, DeepSeek-V3's
+architecture at 16 B parameters (28.8 GB of routed experts, a 31.9 GB checkpoint, against
+32 GB of RAM and an 8 GB GPU under a 6 GB cap). An experts call that would need more than a byte
+budget runs in chunks of experts, with the experts implementation's own combine once per call,
+so a prefill that routes every expert holds 165 MiB of experts instead of a whole layer. It is
+compared with an independent streaming reference, transformers' own model and loader with one
+experts layer materialized at a time, itself checked against `from_pretrained` where that fits.
+Every step equals the reference bit for bit, in two runs with identical digests.
+
 ## Setup
 
 ```bash
@@ -83,6 +92,12 @@ uv run awpmi pack expert-index                                  # Phase 4A: OLMo
 uv run python benchmarks/olmoe_runtime.py --output experiments/phase4a/my-run [--num-prompts 2]
 uv run python benchmarks/olmoe_profile.py --output experiments/phase4a/my-run/profile.json
 uv run python benchmarks/olmoe_report.py experiments/phase4a/my-run [--compare experiments/phase4a/other-run]
+uv run awpmi pack expert-index --config configs/phase4b-moonlight.yaml  # Phase 4B: Moonlight's expert index
+uv run python benchmarks/moonlight_reference_check.py --output experiments/phase4b/reference-check
+uv run python benchmarks/moonlight_runtime.py --output experiments/phase4b/my-run [--stage prepare|reference|stream|digest]
+uv run python benchmarks/moonlight_profile.py --run experiments/phase4b/my-run --configuration stream --trace \
+    --output experiments/phase4b/my-run/profile-stream.json
+uv run python benchmarks/moonlight_report.py experiments/phase4b/my-run [--compare experiments/phase4b/other-run]
 ```
 
 `run.py` writes raw per-input records, validation records, the prompts, the
@@ -111,7 +126,13 @@ split into several tensors without copying them. `olmoe_runtime.py` runs the out
 benchmark in two processes: the fully materialized reference, then the streamed model under a
 device-memory cap, compared with it in every recorded digest. `olmoe_profile.py` times the
 streamed steps without those digests, and `olmoe_report.py` evaluates correctness and gates A–D
-(`configs/phase4a-olmoe.yaml`).
+(`configs/phase4a-olmoe.yaml`). `moonlight_reference_check.py` checks the streaming reference
+against `from_pretrained` on Moonlight truncated to its first layers. `moonlight_runtime.py` runs
+the Phase 4B benchmark: the streaming reference, then the streamed model under a device cap with
+bounded expert calls, every configuration compared with the reference and audited;
+`moonlight_profile.py` times one configuration per process, and `moonlight_report.py` evaluates
+correctness and gates A–F (`configs/phase4b-moonlight.yaml`). The Moonlight tokenizer is the
+official remote code (tiktoken), run at the pinned revision.
 
 ## Layout
 
@@ -121,19 +142,22 @@ src/awpmi/      reference, paging, bounds, state, certificate, schedulers, execu
                 stores (Phase 1C packed store, Phase 2 MLP store), refinement_head (Phase 1C runtime),
                 bounds/{rounding,enclosure,operators,pairwise} and suffix_runtime (Phase 2),
                 storage, streaming, materialization, models/moe and cli (Phase 3),
-                profiles, models/checkpoint and models/olmoe (Phase 4A)
+                profiles, models/checkpoint and models/olmoe (Phase 4A),
+                streaming_reference, models/moonlight and models/streamed (Phase 4B)
 tests/          bound soundness, pages, certificate and ties, reference parity, fallback parity,
                 decomposition exactness, refinement oracle, packing, coarse bounds, runtime,
                 rounding models, operator bounds, enclosure LM head, adaptive suffix,
                 storage (no hidden reads), streaming and caches, runtime on storage, MoE experts, layering,
-                composed segments and compact expert calls (Phase 4A)
+                composed segments and compact expert calls (Phase 4A), chunked expert calls,
+                the streaming reference, the Moonlight adapter and streamed parameters (Phase 4B)
 benchmarks/     run.py, report.py, prompts.py, oracle.py, refinement_oracle.py, refinement_report.py,
                 refinement_runtime.py, refinement_runtime_report.py, fallback_study.py,
                 suffix_runtime.py, suffix_report.py, storage_runtime.py, storage_report.py,
-                moe_runtime.py, moe_report.py, olmoe_runtime.py, olmoe_profile.py, olmoe_report.py
+                moe_runtime.py, moe_report.py, olmoe_runtime.py, olmoe_profile.py, olmoe_report.py,
+                moonlight_runtime.py, moonlight_reference_check.py, moonlight_profile.py, moonlight_report.py
 configs/        smollm2-135m.yaml (pinned model and dataset revisions), phase1b-refinement.yaml,
                 phase1c-runtime.yaml, phase2-suffix.yaml, phase3-storage.yaml, phase3-moe.yaml,
-                phase4a-olmoe.yaml
+                phase4a-olmoe.yaml, phase4b-moonlight.yaml
 experiments/    raw results per phase and run
 packs/          packs and expert indexes (gitignored; rebuilt by `awpmi pack`)
 ```

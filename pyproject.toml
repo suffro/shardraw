@@ -12,6 +12,7 @@ dependencies = [
     "huggingface-hub",
     "pyyaml",
     "pyarrow",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]

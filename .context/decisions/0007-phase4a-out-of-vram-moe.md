@@ -283,7 +283,9 @@ Full report: `history/2026-10-03-awpmi-phase4a-report.md`.
   converted experts.
 - *Splitting calls over experts (bounded prefill buffers) and compute-level hits-first now*: both
   need an exact replica of each experts implementation's combine. Next, for DeepSeek-class
-  layers.
+  layers. **Bounded calls adopted in decision 0008 (Phase 4B)**, without a replica: the experts
+  matrices become stand-ins that compute the grouped GEMM chunk by chunk, and the
+  implementation's own combine runs once per call.
 - *Speculative next-layer or previous-step prefetch now*: a decode step reuses 37.6% of the
   previous step's experts in a layer, so most of a prefetch would be wasted.
 - *An allocator-wide setting (expandable segments) against fragmentation*: environment-wide,

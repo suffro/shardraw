@@ -1,4 +1,5 @@
-"""Layering (decisions 0006, 0007): the storage core knows no model and no certificate; certification knows no storage."""
+"""Layering (decisions 0006-0008): the storage core knows no model and no certificate; certification knows no storage;
+the streaming reference shares nothing with Shardraw's own expert path."""
 
 from __future__ import annotations
 
@@ -9,8 +10,8 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "awpmi"
 CORE = ("storage", "streaming", "materialization")
 # Names that would tie the core to one model, one tensor layout or one routing implementation.
 MODEL_WORDS = re.compile(
-    r"smollm|granite|llama|mixtral|qwen|deepseek|olmoe|gpt.?oss|lm_head|embed_tokens|gate_up_proj|down_proj|"
-    r"gate_proj|up_proj|block_sparse_moe|router|top_k_index|num_experts|safetensors\.index",
+    r"smollm|granite|llama|mixtral|qwen|deepseek|olmoe|moonlight|kimi|gpt.?oss|lm_head|embed_tokens|gate_up_proj|down_proj|"
+    r"gate_proj|up_proj|block_sparse_moe|router|top_k_index|num_experts|shared_expert|e_score|safetensors\.index",
     re.IGNORECASE,
 )
 CORE_FORBIDDEN_IMPORTS = re.compile(
@@ -40,3 +41,16 @@ def test_the_storage_core_knows_no_model():
 def test_certification_does_not_depend_on_storage():
     for path in [*sorted((SRC / "bounds").glob("*.py")), SRC / "certificate.py", SRC / "refinement_head.py"]:
         assert not CERTIFICATION_FORBIDDEN_IMPORTS.search(path.read_text(encoding="utf-8")), path.name
+
+
+# The independent reference (decision 0008) imports nothing of Shardraw's path: no storage, transfer, materialization,
+# expert adapter (compact or chunked calls) or checkpoint index of Shardraw's.
+REFERENCE_FORBIDDEN_IMPORTS = re.compile(
+    r"^\s*(from|import)\s+awpmi\.(storage|streaming|materialization|models|stores)\b|^\s*from\s+awpmi\s+import", re.MULTILINE
+)
+
+
+def test_the_streaming_reference_shares_nothing_with_shardraws_path():
+    text = (SRC / "streaming_reference.py").read_text(encoding="utf-8")
+    assert not REFERENCE_FORBIDDEN_IMPORTS.search(text)
+    assert not re.search(r"\bawpmi\b", text.split('"""', 2)[2])  # beyond its docstring it names no awpmi module at all

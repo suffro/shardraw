@@ -67,11 +67,18 @@ class ExpertStore:
         """Write the slices of `experts` (ascending, unique) into the first rows of `buffers[name]`, in that order.
 
         Each buffer is a contiguous device tensor [≥ n, *row_shape] of the parameter's dtype;
-        rows beyond n are left as they are.
+        rows beyond n are left as they are. `buffers` may name only some of the group's
+        parameters (a chunked call materializes one parameter at a time); they are filled in
+        the group's order.
         """
         group = self.groups[key]
+        unknown = set(buffers) - set(group.segments)
+        if unknown:
+            raise KeyError(f"{key} has no parameters {sorted(unknown)}")
         count = experts.numel()
         for name, segment in group.segments.items():
+            if name not in buffers:
+                continue
             info = self.weights.segment(segment)
             buffer = buffers[name]
             if buffer.dtype != info.torch_dtype or tuple(buffer.shape[1:]) != info.row_shape or buffer.shape[0] < count:

@@ -145,6 +145,59 @@ def expert_sources(model: nn.Module, modules: list[ExpertModule] | None = None) 
     return sources
 
 
+def parameter_segments(model: nn.Module, parameters: list[str], files: Mapping[str, Path]) -> dict[str, Segment]:
+    """Each named parameter's checkpoint tensor, as it is, as a segment named after the parameter (headers only).
+
+    For dense weights served from storage (`awpmi.models.streamed`); a checkpoint's older names are resolved by the
+    mapping's literal renamings, as for the experts.
+    """
+    tensors = checkpoint_tensors(files)
+    renamings = checkpoint_renamings(model)
+    segments = {}
+    for name in parameters:
+        resolved = resolve_tensor_name(name, tensors, renamings)
+        if resolved is None:
+            raise KeyError(f"the checkpoint has no tensor {name}")
+        found = tensors[resolved]
+        segments[name] = Segment(name, found.file, found.offset, found.rows, found.row_bytes, found.dtype, found.row_shape)
+    return segments
+
+
+def checked_expert_sources(
+    model: nn.Module,
+    layout: Mapping[str, tuple[str, ...]],
+    experts_suffix: str,
+    modules: list[ExpertModule] | None = None,
+) -> dict[str, dict[str, tuple[str, ...]]]:
+    """`expert_sources`, required to equal an adapter's own statement of the layout (templates relative to the layer).
+
+    A model adapter states the layout it expects (`layout`: parameter → checkpoint tensor templates
+    after the layer prefix); a change on either side is then an error, not wrong bytes streamed.
+    """
+    modules = find_expert_modules(model) if modules is None else modules
+    derived = expert_sources(model, modules)
+    for entry in modules:
+        if not entry.name.endswith(experts_suffix):
+            raise ValueError(f"unexpected experts module {entry.name}")
+        head = entry.name[: -len(experts_suffix)]
+        expected = {parameter: tuple(head + t for t in templates) for parameter, templates in layout.items()}
+        if derived[entry.name] != expected:
+            raise ValueError(f"{entry.name}: transformers maps {derived[entry.name]}, the adapter's layout is {expected}")
+    return derived
+
+
+def neighbours(model: nn.Module, experts_suffix: str, suffix: str, modules: list[ExpertModule] | None = None) -> dict[str, nn.Module]:
+    """Experts module name → the module at `suffix` in the same layer (its router, its shared experts, its MoE block)."""
+    modules = find_expert_modules(model) if modules is None else modules
+    found = {}
+    for entry in modules:
+        if not entry.name.endswith(experts_suffix):
+            raise ValueError(f"unexpected experts module {entry.name}")
+        head = entry.name[: -len(experts_suffix)]
+        found[entry.name] = model.get_submodule((head + suffix).rstrip("."))
+    return found
+
+
 def _literal(pattern: str) -> bool:
     """A pattern with no regex syntax but '.' (which transformers' patterns use for a literal dot)."""
     return not re.search(r"[\^$*+?()\[\]{}|\\]", pattern)

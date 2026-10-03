@@ -1400,6 +1400,10 @@ diagram, without the AWPMI refinement inside experts:
 - Phase 4A (decision 0007), a milestone the user added outside the four phases: a model whose
   experts exceed the GPU (OLMoE-1B-7B), with compact expert calls and split checkpoints read in
   place, bit for bit equal to the fully materialized reference.
+- Phase 4B (decision 0008), also added by the user: DeepSeek-V3's architecture (Moonlight-16B-A3B)
+  out of both VRAM and host RAM, with expert calls bounded by a byte budget (chunks of experts,
+  the implementation's own combine) and an independent streaming reference. Decision 0008 names
+  the hook where AWPMI refinement inside selected experts would go.
 
 The scheduling, optimization and evaluation items of this Phase 4 are not started.
 

@@ -37,24 +37,15 @@ REFERENCE_PROFILE = BF16_REFERENCE.with_kernels(experts="grouped_mm", attention=
 
 def expert_sources(model: nn.Module, modules: list[ExpertModule] | None = None) -> dict[str, dict[str, tuple[str, ...]]]:
     """The checkpoint tensors of every expert-sliced parameter, as transformers declares them, checked against OLMoE's layout."""
-    modules = find_expert_modules(model) if modules is None else modules
-    derived = checkpoint.expert_sources(model, modules)
-    for entry in modules:
-        if not entry.name.endswith(EXPERTS_SUFFIX):
-            raise ValueError(f"unexpected experts module {entry.name}")
-        head = entry.name[: -len(EXPERTS_SUFFIX)]
-        expected = {parameter: tuple(head + t for t in templates) for parameter, templates in EXPERT_LAYOUT.items()}
-        if derived[entry.name] != expected:
-            raise ValueError(f"{entry.name}: transformers maps {derived[entry.name]}, OLMoE's layout is {expected}")
-    return derived
+    return checkpoint.checked_expert_sources(model, EXPERT_LAYOUT, EXPERTS_SUFFIX, modules)
 
 
 def routers(model: nn.Module) -> dict[str, nn.Module]:
     """Experts module name → the router that chooses for it."""
-    found = {}
-    for entry in find_expert_modules(model):
-        router = model.get_submodule(entry.name[: -len(EXPERTS_SUFFIX)] + ROUTER_SUFFIX)
+    modules = find_expert_modules(model)
+    found = checkpoint.neighbours(model, EXPERTS_SUFFIX, ROUTER_SUFFIX, modules)
+    for entry in modules:
+        router = found[entry.name]
         if getattr(router, "num_experts", None) != entry.num_experts or not hasattr(router, "top_k"):
             raise ValueError(f"{entry.name}: no router next to it")
-        found[entry.name] = router
     return found

@@ -39,6 +39,25 @@ memory then follows the routed (and cached) experts, not the expert count. Poiso
 spare slots and fills every slot with NaN before assembly: the spares must never be read,
 and assembly must write every routed byte.
 
+Chunked calls (Phase 4B, decision 0008) bound a compact call that would exceed a byte budget
+(`max_call_bytes`): a prefill that routes every expert of a DeepSeek-class layer would
+otherwise need the whole layer. The served experts are split into chunks of consecutive slots
+that fit the budget, and each expert-sliced matrix becomes a `ChunkedExpertWeight` for the
+call: a stand-in that is not a tensor, through which the module's own forward reaches the
+weights in one of two ways only:
+
+  * `weight[slot]` (the eager implementation, one expert at a time, ascending): the chunk that
+    holds the slot is materialized, the previous one released;
+  * `torch._grouped_mm(x, weight or weight.transpose(-2, -1), offs=...)` (grouped_mm): the
+    groups are computed chunk by chunk, each chunk's rows with the same per-group GEMMs as the
+    full call, into one output.
+
+Everything else the forward does (sorting, weighting, the combine) is its own code, run once
+on the whole call, so the accumulation order is the reference's. Any other use of the stand-in
+raises. The grouped path is exact when each group's product does not depend on the other
+groups in the call, which holds where `_grouped_mm` runs one GEMM per group (this GPU; checked
+by the tests and the benchmark); the eager path changes nothing but when weights are present.
+
 `FullLayerOffload` is the reference execution for a model whose experts do not fit on the
 device: each experts module's own parameters stay in host memory (as the transformers loader
 made them), are copied whole to the device just before the module runs, and the module's
@@ -47,7 +66,9 @@ forward runs unchanged on them. It is the fully materialized model, one layer at
 
 from __future__ import annotations
 
+import bisect
 import hashlib
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -227,19 +248,198 @@ class ExpertCall:
     call_index: torch.Tensor
     served: list[int]
     output: torch.Tensor
+    chunks: list[tuple[int, int]] | None = None  # slot ranges of a chunked call (decision 0008)
+    parameters: tuple[str, ...] = ()
 
-    def per_assignment_outputs(self) -> torch.Tensor:
+    def per_assignment_outputs(self, weights: Callable[[torch.Tensor], Mapping[str, torch.Tensor]] | None = None) -> torch.Tensor:
         """Every (token, k) assignment's expert output before routing weights, [tokens·k, hidden].
 
-        The module runs again on the same weights (no hooks), with each assignment as a token
-        routed to its expert alone with weight 1: the experts group the same rows per expert
-        as in the call, and multiplying by 1 and summing one term are exact.
+        The module runs again (no hooks), with each assignment as a token routed to its expert
+        alone with weight 1: the experts group the same rows per expert as in the call, and
+        multiplying by 1 and summing one term are exact. An unchunked call runs on the call's
+        own weights. A chunked call's weights are released once used, so `weights(experts)`
+        must supply every expert-sliced parameter of those experts ([n, ...] each, in that
+        order): the module runs once per chunk, with the chunk's assignments, i.e. the same
+        groups as in the call.
         """
         top_k = self.top_k_index.shape[-1]
         hidden = self.hidden_states.repeat_interleave(top_k, dim=0)
         index = self.call_index.reshape(-1, 1)
         ones = torch.ones(index.shape[0], 1, dtype=self.top_k_weights.dtype, device=index.device)
-        return self.experts_module.forward(hidden, index, ones)
+        if self.chunks is None:
+            return self.experts_module.forward(hidden, index, ones)
+        if weights is None:
+            raise RuntimeError("a chunked call's weights are released after use: pass weights=")
+        module = self.experts_module
+        saved = ({p: module._parameters[p] for p in self.parameters}, module.num_experts)
+        output = None
+        try:
+            for first, end in self.chunks:
+                rows = ((index[:, 0] >= first) & (index[:, 0] < end)).nonzero().squeeze(1)
+                if not rows.numel():
+                    continue
+                for parameter, tensor in weights(torch.tensor(self.served[first:end], dtype=torch.int64)).items():
+                    if parameter not in self.parameters:
+                        raise KeyError(f"{self.module} has no expert parameter {parameter}")
+                    module._parameters[parameter] = nn.Parameter(tensor, requires_grad=False)
+                module.num_experts = end - first
+                part = module.forward(hidden[rows], index[rows] - first, ones[rows])
+                if output is None:
+                    output = torch.zeros((index.shape[0], *part.shape[1:]), dtype=part.dtype, device=part.device)
+                output[rows] = part
+        finally:
+            for parameter, value in saved[0].items():
+                module._parameters[parameter] = value
+            module.num_experts = saved[1]
+        return output
+
+
+class ChunkedExpertWeight:
+    """An expert-sliced matrix of one chunked experts call: a stand-in, not a tensor (module docstring).
+
+    `shape`, `dtype` and `device` describe the call's compact parameter [slots, ...]. The
+    weights are reached by `weight[slot]` or by `torch._grouped_mm`; `transpose(-2, -1)` gives
+    a view for the latter. Any other operation raises, and so does any use after the call.
+    """
+
+    def __init__(self, call: _ChunkedCall, parameter: str, base: ChunkedExpertWeight | None = None, transposed: bool = False) -> None:
+        self.call = call
+        self.parameter = parameter
+        self.base = self if base is None else base
+        self.transposed = transposed
+        rows, dtype = call.shapes[parameter]
+        self.shape = torch.Size((call.slots, *(rows[::-1] if transposed else rows)))
+        self.dtype = dtype
+        self.device = call.device
+        self._loaded: tuple[int, torch.Tensor] | None = None
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    def dim(self) -> int:
+        return len(self.shape)
+
+    def size(self, dim: int | None = None):
+        return self.shape if dim is None else self.shape[dim]
+
+    def transpose(self, dim0: int, dim1: int) -> ChunkedExpertWeight:
+        if {dim0 % self.ndim, dim1 % self.ndim} != {self.ndim - 2, self.ndim - 1} or self.ndim != 3:
+            raise TypeError("a chunked expert weight only transposes its last two dimensions")
+        return ChunkedExpertWeight(self.call, self.parameter, base=self.base, transposed=not self.transposed)
+
+    @property
+    def mT(self) -> ChunkedExpertWeight:  # noqa: N802 (torch's name)
+        return self.transpose(-2, -1)
+
+    def __getitem__(self, index) -> torch.Tensor:
+        if self.transposed:
+            raise TypeError("index a chunked expert weight before transposing it")
+        if isinstance(index, torch.Tensor) and index.dim() == 0 and not index.is_floating_point():
+            index = int(index)
+        if not isinstance(index, int):
+            raise TypeError(f"a chunked expert weight serves one expert at a time, not {type(index).__name__}")
+        chunk = self.call.chunk_of(index)
+        first = self.call.chunks[chunk][0]
+        return self.base.load(chunk)[index - first]
+
+    def load(self, chunk: int) -> torch.Tensor:
+        """The chunk's slices of this parameter on the device (the previous chunk is released)."""
+        if self._loaded is not None and self._loaded[0] == chunk:
+            return self._loaded[1]
+        self.release()
+        self._loaded = (chunk, self.call.materialize(self.parameter, chunk))
+        return self._loaded[1]
+
+    def release(self) -> None:
+        if self._loaded is not None:
+            self.call.released(self._loaded[1])
+            self._loaded = None
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if func is torch._grouped_mm:
+            return _chunked_grouped_mm(func, *args, **kwargs)
+        name = getattr(func, "__name__", repr(func))
+        raise TypeError(f"{name} on a chunked expert weight: only one expert at a time or a grouped GEMM can use it")
+
+    def __repr__(self) -> str:
+        return f"ChunkedExpertWeight({self.call.module}.{self.parameter}, {tuple(self.shape)}, chunks={self.call.chunks})"
+
+
+def _chunked_grouped_mm(op, mat_a, mat_b, offs=None, **kwargs) -> torch.Tensor:
+    """`op(mat_a, mat_b, offs=offs)` with `mat_b` chunked: each chunk's groups by one call of `op` on its rows.
+
+    Rows after the last group stay zero, as in the per-group fallback this mirrors.
+    """
+    if not isinstance(mat_b, ChunkedExpertWeight) or isinstance(mat_a, ChunkedExpertWeight):
+        raise TypeError("only the right operand of a grouped GEMM may be a chunked expert weight")
+    if offs is None or mat_a.dim() != 2 or kwargs.get("bias") is not None:
+        raise TypeError("a chunked grouped GEMM needs a 2-D input, offsets and no bias")
+    call = mat_b.call
+    ends = offs.tolist()  # one host sync, as the per-group fallback does
+    if len(ends) != call.slots:
+        raise ValueError(f"{len(ends)} groups for {call.slots} slots")
+    out = torch.zeros((mat_a.shape[0], mat_b.shape[2]), dtype=kwargs.get("out_dtype") or mat_a.dtype, device=mat_a.device)
+    for chunk, (first, end) in enumerate(call.chunks):
+        data = mat_b.base.load(chunk)
+        begin, finish = (ends[first - 1] if first else 0), ends[end - 1]
+        if finish > begin:
+            operand = data.transpose(-2, -1) if mat_b.transposed else data
+            local = (offs[first:end] - begin).to(offs.dtype)
+            out[begin:finish] = op(mat_a[begin:finish], operand, offs=local, **kwargs)
+    mat_b.base.release()
+    return out
+
+
+@dataclass
+class _ChunkedCall:
+    """The chunks of one experts call and the materialization of their slices (decision 0008)."""
+
+    owner: StreamedExperts
+    module: str
+    served: torch.Tensor  # experts in slot order (CPU, ascending)
+    chunks: list[tuple[int, int]]  # slot ranges [first, end)
+    slots: int  # the call's expert count (served + poison spares)
+    shapes: dict[str, tuple[tuple[int, ...], torch.dtype]]  # chunked parameter → (row shape, dtype)
+    device: torch.device
+    poison: bool
+    loads: list[tuple[str, int]] = field(default_factory=list)  # (parameter, chunk) in materialization order
+    closed: bool = False  # set when the call returns: its stand-ins can no longer reach any weight
+    _starts: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._starts = [first for first, _ in self.chunks]
+
+    def chunk_of(self, slot: int) -> int:
+        chunk = bisect.bisect_right(self._starts, slot) - 1
+        if chunk < 0 or slot >= self.chunks[chunk][1]:
+            raise IndexError(f"slot {slot} serves no expert of {self.module}")
+        return chunk
+
+    def materialize(self, parameter: str, chunk: int) -> torch.Tensor:
+        if self.closed:
+            raise RuntimeError(f"{self.module}: a chunked expert weight was used after its call")
+        first, end = self.chunks[chunk]
+        rows, dtype = self.shapes[parameter]
+        buffer = torch.empty((end - first, *rows), dtype=dtype, device=self.device)
+        if self.poison:
+            buffer.fill_(float("nan") if dtype.is_floating_point else -1)
+        nbytes = buffer.numel() * buffer.element_size()
+        self.owner.experts.assemble(self.module, self.served[first:end], {parameter: buffer})
+        self.owner._hold(nbytes)
+        self.loads.append((parameter, chunk))
+        return buffer
+
+    def released(self, buffer: torch.Tensor) -> None:
+        self.owner._hold(-buffer.numel() * buffer.element_size())
+
+    def check_complete(self) -> None:
+        """Every chunk of every chunked parameter was materialized exactly once (no rereads, nothing skipped)."""
+        expected = sorted((parameter, chunk) for parameter in self.shapes for chunk in range(len(self.chunks)))
+        if sorted(self.loads) != expected:
+            raise RuntimeError(f"{self.module}: chunks materialized {self.loads}, expected each of {expected} once")
 
 
 _CALL_ARGUMENTS = ("hidden_states", "top_k_index", "top_k_weights")
@@ -274,6 +474,7 @@ class StreamedExperts:
     all_experts: bool = False  # serve every expert of every layer (dense layer streaming, the baseline)
     compact: bool = False  # buffers for the routed experts only (decision 0007)
     on_call: Callable[[ExpertCall], None] | None = None
+    max_call_bytes: int | None = None  # compact mode: a call needing more expert buffers runs in chunks (decision 0008)
     _modules: list[ExpertModule] = field(default_factory=list, init=False)
     _handles: list = field(default_factory=list, init=False)
     _originals: dict = field(default_factory=dict, init=False)
@@ -282,6 +483,19 @@ class StreamedExperts:
     _active: dict = field(default_factory=dict, init=False)
     compact_bytes: int = field(default=0, init=False)  # bytes of the compact buffers of the call in flight
     peak_compact_bytes: int = field(default=0, init=False)
+    calls: int = field(default=0, init=False)
+    chunked_calls: int = field(default=0, init=False)
+    chunk_loads: int = field(default=0, init=False)  # chunk slices materialized (one per chunk and parameter)
+
+    def _hold(self, nbytes: int) -> None:
+        self.compact_bytes += nbytes
+        self.peak_compact_bytes = max(self.peak_compact_bytes, self.compact_bytes)
+        if nbytes > 0 and self.max_call_bytes is not None and self.compact_bytes > self.max_call_bytes and self._chunking:
+            raise RuntimeError(f"expert buffers of {self.compact_bytes} bytes exceed the call budget of {self.max_call_bytes}")
+
+    @property
+    def _chunking(self) -> bool:
+        return any(active[4] is not None for active in self._active.values())
 
     def install(self) -> StreamedExperts:
         if self._handles:
@@ -361,43 +575,79 @@ class StreamedExperts:
             routed = routed_experts(top_k_index, count)
             served = torch.arange(count, device=routed.device) if self.all_experts else routed
             slots = served.numel() + (POISON_SPARE_SLOTS if self.poison else 0)
-            buffers = {}
-            for parameter, (shape, dtype) in self._placeholders[entry.name].items():
-                buffers[parameter] = torch.empty((slots, *shape[1:]), dtype=dtype, device=hidden.device)
-                if self.poison:
-                    buffers[parameter].fill_(float("nan") if dtype.is_floating_point else -1)
-            self.experts.assemble(entry.name, served.cpu(), buffers)
-            nbytes = sum(buffer.numel() * buffer.element_size() for buffer in buffers.values())
-            self.compact_bytes += nbytes
-            self.peak_compact_bytes = max(self.peak_compact_bytes, self.compact_bytes)
+            shapes = self._placeholders[entry.name]
+            row_bytes = {p: math.prod(shape[1:]) * dtype.itemsize for p, (shape, dtype) in shapes.items()}
+            chunked = None
+            if self.max_call_bytes is not None and slots * sum(row_bytes.values()) > self.max_call_bytes:
+                chunked = self._plan_chunks(entry, served.cpu(), slots, hidden.device, row_bytes)
+            self.calls += 1
             # Slot of each expert; anything outside [0, E) (a sentinel) maps to the new expert count.
             slot_of = torch.full((count,), slots, dtype=top_k_index.dtype, device=top_k_index.device)
             slot_of[served.to(top_k_index.device)] = torch.arange(served.numel(), dtype=top_k_index.dtype, device=top_k_index.device)
             valid = (top_k_index >= 0) & (top_k_index < count)
             call_index = torch.where(valid, slot_of[top_k_index.clamp(0, count - 1)], torch.full_like(top_k_index, slots))
+            whole = {p: v for p, v in shapes.items() if chunked is None or p not in chunked.shapes}
+            buffers = {}
+            for parameter, (shape, dtype) in whole.items():
+                buffers[parameter] = torch.empty((slots, *shape[1:]), dtype=dtype, device=hidden.device)
+                if self.poison:
+                    buffers[parameter].fill_(float("nan") if dtype.is_floating_point else -1)
+            nbytes = sum(buffer.numel() * buffer.element_size() for buffer in buffers.values())
+            self._active[entry.name] = (top_k_index, call_index, served.tolist(), nbytes, chunked)
+            if buffers:
+                self.experts.assemble(entry.name, served.cpu(), buffers)
+            self._hold(nbytes)
             for parameter, buffer in buffers.items():
                 module._parameters[parameter] = nn.Parameter(buffer, requires_grad=False)
+            if chunked is not None:
+                self.chunked_calls += 1
+                for parameter in chunked.shapes:
+                    module._parameters[parameter] = ChunkedExpertWeight(chunked, parameter)
             module.num_experts = slots
-            self._active[entry.name] = (top_k_index, call_index, served.tolist(), nbytes)
             if self.on_route is not None:
                 self.on_route(RoutingRecord(entry.name, routed.tolist(), hidden.shape[0]))
             return _replace_argument(args, kwargs, 1, call_index)
 
         return hook
 
+    def _plan_chunks(self, entry: ExpertModule, served: torch.Tensor, slots: int, device, row_bytes: dict[str, int]) -> _ChunkedCall:
+        """Chunks of consecutive slots whose expert matrices, with the call's small parameters, fit `max_call_bytes`."""
+        shapes = self._placeholders[entry.name]
+        matrices = {p: (shape[1:], dtype) for p, (shape, dtype) in shapes.items() if len(shape) >= 3}
+        whole_bytes = slots * sum(b for p, b in row_bytes.items() if p not in matrices)
+        per_expert = sum(row_bytes[p] for p in matrices)
+        size = (self.max_call_bytes - whole_bytes) // per_expert if per_expert else 0
+        if size < 1:
+            raise ValueError(f"{entry.name}: a budget of {self.max_call_bytes} bytes holds no expert ({per_expert} bytes)")
+        count = served.numel()
+        chunks = [(first, min(first + size, count)) for first in range(0, count, size)]
+        return _ChunkedCall(self, entry.name, served, chunks, slots, matrices, device, self.poison)
+
     def _compact_release(self, entry: ExpertModule):
         def hook(module, args, kwargs, output):
-            active = self._active.pop(entry.name, None)
+            active = self._active.get(entry.name)
             try:
+                chunked = None if active is None else active[4]
+                if chunked is not None:
+                    for parameter in chunked.shapes:
+                        weight = module._parameters.get(parameter)
+                        if isinstance(weight, ChunkedExpertWeight):
+                            weight.release()
+                    chunked.closed = True
+                    chunked.check_complete()
+                    self.chunk_loads += len(chunked.loads)
                 if active is not None and self.on_call is not None:
-                    top_k_index, call_index, served, _ = active
+                    top_k_index, call_index, served, _, _ = active
                     self.on_call(
                         ExpertCall(
                             entry.name, module, _call_argument(args, kwargs, 0), top_k_index, _call_argument(args, kwargs, 2),
                             call_index, served, output,
+                            chunks=None if chunked is None else list(chunked.chunks),
+                            parameters=tuple(self._placeholders[entry.name]),
                         )
                     )
             finally:
+                self._active.pop(entry.name, None)
                 for parameter in self._placeholders[entry.name]:
                     module._parameters[parameter] = None
                 module.num_experts = entry.num_experts

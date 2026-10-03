@@ -40,6 +40,12 @@ Implemented so far:
   split checkpoint through composed segments and executed by a compact experts call (buffers for
   the routed experts only), bit for bit equal to the fully materialized reference executed one
   layer at a time. Reference profiles declare what "exact" is relative to.
+- **Phase 4B**: a DeepSeek-V3-architecture MoE out of both VRAM and host RAM (decision 0008).
+  Moonlight-16B-A3B (28.8 GB of routed experts, 31.9 GB in all, against 32 GB of RAM and an 8 GB
+  GPU under a 6 GB cap) runs with bounded expert buffers: an experts call whose routed experts
+  exceed a byte budget runs in chunks of experts, with the experts implementation's own combine.
+  It is compared with an independent streaming reference: transformers' model and loader, each
+  experts layer materialized whole from the checkpoint when it runs.
 
 ## Major components (`src/awpmi/`)
 
@@ -65,10 +71,13 @@ Implemented so far:
 | `stores/refinement.py` | Phase 1C: `PackedRefinementStore`, packed levels, scales, resident remainder norms and the original rows. `read_level` / `read_exact` / `read_fallback` are the only way to weight values; each read is logged with its rows and bytes (`bytes_read`, `reads`). Phase 3: it reads through a `MaterializationBackend`: `from_decomposition` (segments resident on the weight's device, Phase 1C) or `from_pack` (a refinement pack on storage); a level row is one record, the packed codes then the float32 scale (`level_records`); `write_refinement_pack` writes the pack, its exact rows referring to the checkpoint tensor. |
 | `storage/` | Phase 3 storage core (no model, no certificate). `layout`: `Segment` (fixed-size rows at an offset of a file; a safetensors tensor is one as it is), Phase 4A `ComposedSegment` (each row the concatenation of byte spans of one or more files: a logical tensor a checkpoint stores as several tensors), `byte_runs`, safetensors headers, typed row views. `fileio`: `PositionedFile` (thread-safe positioned reads; direct = `FILE_FLAG_NO_BUFFERING` / `O_DIRECT`), the OS's per-process read counters, process memory, aligned (pinned) host buffers. `store`: `plan_reads` (runs of requested bytes, sorted by file and offset → 4 KiB-aligned extents per file, merged when their blocks touch; each run keeps its output offset; `positions` writes rows into chosen rows of an output), `IOStats`, `PageStore` with `InMemoryPageStore` and `FileBackedPageStore` (reads the planned extents only, of any of its files, with 8 worker threads). `cache`: `PageCache` (device pages under a byte budget, pinned entries, admission freeze) with `LRUPolicy` and `HotnessPolicy`. `pack`: `PackWriter` (v2 adds composed segments and publisher-declared file sha256), `open_pack` (manifest with files, segments and sha256; segments or files re-hashed with direct reads), `Pack.store` / `Pack.load` (the host-memory tier), `SourceFile` (a published checkpoint file in the Hugging Face cache; `published_sha256`), `sha256_file_direct`. |
 | `streaming/streamer.py` | Phase 3 transfer layer: `PageStreamer`. Pinned, page-aligned staging slots (two: double buffering), a CUDA copy stream, per-slot events, and the compute stream waiting on a ready event. A file-backed fetch reads its plan in slot-sized pieces and copies only the requested rows' bytes to the device; a host-memory fetch gathers into a slot. Phase 4A: `fetch(…, out, positions)` writes into a caller's buffer (the copy stream first waits for the caller's stream); runs of at least 256 KiB go straight from staging, shorter ones are gathered; scattered destinations get one copy per contiguous range. `prefetch` returns a `Ticket` (consumed and wasted bytes counted). |
-| `materialization/` | Phase 3: `MaterializationBackend` (`materialize(segment, rows, out=None)` → device rows: a store in memory on the compute device answers directly; otherwise the cache, then the streamer; with `out`, written into a caller's buffer, cached rows copied first ("hits first"); cache entries in their own CUDA memory pool; every request counted; `report` gathers the storage, transfer and cache counters), `WeightStore` (typed rows of named weights), `ExpertStore` / `ExpertGroup` (a layer's expert-sliced segments; `load`, `fill` into full-shape buffers, Phase 4A `assemble` into compact buffers). |
-| `models/moe.py` | MoE adapter, model-agnostic over the experts convention of transformers 5: `find_expert_modules` (a module with `num_experts` and a ≥3-D parameter whose first dimension is that count), `write_expert_pack` (refers to checkpoint tensors with the same bytes, copies the rest), `StreamedExperts` (Phase 3 full-shape slot buffers; Phase 4A `compact=True`: parameters `None` between calls, buffers for the routed experts in ascending order, `num_experts` and `top_k_index` remapped for the call; poison mode; `all_experts` for dense layer streaming; `on_call` with an `ExpertCall`, whose `per_assignment_outputs` re-runs the call per (token, expert) on the same weights), `FullLayerOffload` (the reference for a model whose experts do not fit: host parameters copied whole to the device before each experts call), `move_except_experts`, `routed_experts`, `record_routing`. |
-| `models/checkpoint.py` | Phase 4A: a published checkpoint served in place. `checkpoint_sources` (the files of a pinned revision, with their Hub sha256), `expert_sources` (each expert-sliced parameter's checkpoint tensors, derived from the transformers conversion mapping: stacking per expert, optionally concatenation along each expert's first dimension; literal renamings reversed; anything else refused), `expert_index_segments` (composed segments from headers, shapes and dtypes checked), `write_expert_index` (a pack v2 that copies nothing), `load_model_without_experts` (meta skeleton, every non-expert tensor read with direct I/O and cast by transformers' dtype plan, non-persistent buffers from `_init_weights`; experts stay on `meta`). |
+| `materialization/` | Phase 3: `MaterializationBackend` (`materialize(segment, rows, out=None)` → device rows: a store in memory on the compute device answers directly; otherwise the cache, then the streamer; with `out`, written into a caller's buffer, cached rows copied first ("hits first"); cache entries in their own CUDA memory pool; every request counted; `report` gathers the storage, transfer and cache counters), `WeightStore` (typed rows of named weights), `ExpertStore` / `ExpertGroup` (a layer's expert-sliced segments; `load`, `fill` into full-shape buffers, Phase 4A `assemble` into compact buffers; Phase 4B: `assemble` of some parameters only, and the backend's `largest_request_bytes`). |
+| `models/moe.py` | MoE adapter, model-agnostic over the experts convention of transformers 5: `find_expert_modules` (a module with `num_experts` and a ≥3-D parameter whose first dimension is that count), `write_expert_pack` (refers to checkpoint tensors with the same bytes, copies the rest), `StreamedExperts` (Phase 3 full-shape slot buffers; Phase 4A `compact=True`: parameters `None` between calls, buffers for the routed experts in ascending order, `num_experts` and `top_k_index` remapped for the call; poison mode; `all_experts` for dense layer streaming; `on_call` with an `ExpertCall`, whose `per_assignment_outputs` re-runs the call per (token, expert) on the same weights). Phase 4B `max_call_bytes`: a call whose buffers would exceed it runs in chunks of consecutive slots; each expert matrix is a `ChunkedExpertWeight` for the call, a stand-in (not a tensor) reachable only by `weight[slot]` (eager) or `torch._grouped_mm` (computed chunk by chunk, each chunk's groups by one call on its rows); every chunk of every matrix materialized exactly once, the stand-ins closed after the call; `ExpertCall.chunks`, and `per_assignment_outputs(weights=…)` for chunked calls. `FullLayerOffload` (the reference for a model whose experts do not fit: host parameters copied whole to the device before each experts call), `move_except_experts`, `routed_experts`, `record_routing`. |
+| `models/checkpoint.py` | Phase 4A: a published checkpoint served in place. `checkpoint_sources` (the files of a pinned revision, with their Hub sha256), `expert_sources` (each expert-sliced parameter's checkpoint tensors, derived from the transformers conversion mapping: stacking per expert, optionally concatenation along each expert's first dimension; literal renamings reversed; anything else refused), `expert_index_segments` (composed segments from headers, shapes and dtypes checked), `write_expert_index` (a pack v2 that copies nothing), `load_model_without_experts` (meta skeleton, every non-expert tensor read with direct I/O and cast by transformers' dtype plan, non-persistent buffers from `_init_weights`; experts stay on `meta`). Phase 4B: `checked_expert_sources` and `neighbours` (an adapter's layout check and its per-layer modules, shared by the OLMoE and Moonlight adapters), `parameter_segments` (named parameters' checkpoint tensors as segments, headers only). |
 | `models/olmoe.py` | Phase 4A OLMoE adapter: `EXPERT_LAYOUT` checked against transformers' mapping, `routers`, `REFERENCE_PROFILE` (BF16, `grouped_mm`, SDPA). |
+| `models/moonlight.py` | Phase 4B Moonlight adapter (DeepSeek-V3 architecture): `EXPERT_LAYOUT` (checked), `routers` (with their float32 correction bias), `shared_experts`, `moe_blocks`, `ROUTING` and `check_config` (sigmoid `noaux_tc`, one group, top 6, renormalized × 2.446: what transformers' router computes), `REFERENCE_PROFILE` (BF16, `grouped_mm`, SDPA). |
+| `models/streamed.py` | Phase 4B `StreamedParameters`: chosen dense parameters (e.g. shared experts) served whole from a `WeightStore` at every call of their module, `None` between calls; `remove(restore=True)` makes them resident again. |
+| `streaming_reference.py` | Phase 4B independent reference, `StreamingReference`: transformers' model built on `meta` with the declared kernels; every non-expert weight loaded by transformers' own `convert_and_load_state_dict_in_model` (safetensors slices opened as `from_pretrained` opens them, its dtype plan and mapping, its finalization); each experts layer loaded by the same function in a pre-hook and released after the module ran (`None` between calls); `resident` and `set_resident` for the residency check; `ReferenceCall.per_assignment_outputs`. Imports nothing of Shardraw's path (layering test). |
 | `profiles.py` | Phase 4A reference profiles: `ReferenceProfile` (kind, stored weight dtype, compute dtype, kernels, numerics, quantization), `BF16_REFERENCE`, `FP16_REFERENCE`, `native_quantized_reference` (declared, refused by `check_model`); `check_model`, `check_weights`. |
 | `cli.py` | `awpmi pack lm-head`, `awpmi pack experts` (roadmap §3.2) and `awpmi pack expert-index` (Phase 4A: the composed-segment index of a split checkpoint, from headers only). |
 | `stores/suffix.py` | Phase 2: `MLPStore`, neuron-major pages of the last MLP (gate row, up row, down column of each neuron, one contiguous run each), served only for the stage's adaptive roles, every read logged; resident metadata: down column norms, down row norms (L2, L∞), up row norms. |
@@ -113,6 +122,17 @@ streamed model under a device-memory cap, every configuration compared with the 
 every digest and audited), `benchmarks/olmoe_report.py` (correctness and gates A–D),
 `benchmarks/olmoe_profile.py` (un-instrumented timing per stage, kernel trace),
 `configs/phase4a-olmoe.yaml` and `experiments/phase4a/<run>/`.
+Phase 4B adds `benchmarks/moonlight_runtime.py` (two processes: the streaming reference with its
+residency check and the sha256 of every expert row it loads; then, under the device cap, the
+files verified, every index row audited against the reference's digests, and every
+configuration compared with the reference in every digest and audited; chunked calls' expert
+outputs checked by rereading their experts through a separate store),
+`benchmarks/moonlight_reference_check.py` (the streaming reference against `from_pretrained` on
+Moonlight truncated to its first layers), `benchmarks/moonlight_report.py` (correctness, gates
+A–F, prefill and memory tables, a replay of the routing through the cache),
+`benchmarks/moonlight_profile.py` (un-instrumented timing per stage, one configuration per
+process, kernel trace by kind and module scope), `configs/phase4b-moonlight.yaml` and
+`experiments/phase4b/<run>/`.
 
 ## Data flow (one input)
 
@@ -179,6 +199,24 @@ Phase 4A, compact (`StreamedExperts(compact=True)`), for each experts call:
    each expert's slot; the module's own forward runs;
 4. a forward hook releases the buffers: the parameters are `None` again.
 
+Phase 4B, chunked (`StreamedExperts(compact=True, max_call_bytes=B)`), when |R| × expert bytes > B:
+
+1. R (ascending) is split into chunks of ⌊B / expert bytes⌋ consecutive slots; each expert matrix
+   becomes a `ChunkedExpertWeight` (small expert-sliced parameters, e.g. biases, are assembled
+   whole); `num_experts` and `top_k_index` are remapped as in compact mode;
+2. the module's own forward runs. `grouped_mm`: its sort, offsets, gating, weighting and combine
+   run as written; each `torch._grouped_mm` on a stand-in materializes chunk after chunk (cache
+   first, then the drive, into a buffer of that chunk only), multiplies the chunk's groups by one
+   call on their rows into one output, and releases the chunk. eager: `weight[slot]` materializes
+   the chunk holding the slot (ascending, so each chunk once);
+3. the release hook checks that every chunk of every matrix was materialized exactly once, and
+   closes the stand-ins.
+
+Phase 4B, the reference (`StreamingReference`), in its own process: transformers' model with
+every non-expert weight on the device (loaded by transformers' loader); before each experts
+module runs, a pre-hook loads that layer's checkpoint tensors through the same loader (stacked,
+gate/up fused, on the device), the module runs on the full layer, and a hook releases it.
+
 ## Important constraints
 
 - The certificate bounds the **floating-point reference logits** (after accumulation
@@ -220,11 +258,17 @@ Phase 4A, compact (`StreamedExperts(compact=True)`), for each experts call:
   direct access to one file, and wait for cached handles to close after setup.
 - The MoE adapter's Phase 3 slot buffers have the experts' full shape (E × expert bytes per
   layer and buffer set). The compact mode (decision 0007) holds only the routed experts, in
-  ascending expert order (required for the eager implementation to stay bitwise); a prefill
-  that routes every expert still needs one layer of buffers, which a DeepSeek-class layer would
-  not fit.
+  ascending expert order (required for the eager implementation to stay bitwise). A call budget
+  (decision 0008) bounds a call's expert buffers, a prefill that routes every expert included:
+  the call runs in chunks of consecutive experts, and the combine stays the implementation's own,
+  once per call. The `grouped_mm` path is exact where each group's product does not depend on the
+  call's other groups (here: one cuBLAS GEMM per group); accumulating per chunk would not be
+  (tested adversarially).
 - "Exact" is relative to a declared reference profile (`awpmi.profiles`, decision 0007):
   streamed weights are used in their stored dtype and never converted on the fly.
 - A model whose experts do not fit on the device is compared with `FullLayerOffload`, the same
   model with each experts layer materialized whole in turn, in a separate process; residency is
-  checked not to change any result.
+  checked not to change any result. A model that does not fit in host memory either is compared
+  with `StreamingReference` (decision 0008): transformers' own loader, one experts layer at a
+  time from the checkpoint, sharing no code with Shardraw's expert path (layering test), and
+  itself checked against `from_pretrained` where that fits.

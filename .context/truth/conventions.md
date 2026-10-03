@@ -54,6 +54,15 @@
   (un-instrumented timing), and
   `python -m uv run python benchmarks/olmoe_report.py <run> --compare <second run>`. The two runs
   of a pair use different `PYTHONHASHSEED` values.
+- Phase 4B Moonlight (out of VRAM and host RAM): `python -m uv run awpmi pack expert-index --config configs/phase4b-moonlight.yaml`
+  (headers only), `python -m uv run python benchmarks/moonlight_reference_check.py --output experiments/phase4b/reference-check`
+  (the streaming reference against `from_pretrained` on the truncated model), then
+  `PYTHONHASHSEED=<n> python -m uv run python benchmarks/moonlight_runtime.py --output experiments/phase4b/<name>`
+  (reference and stream stages in processes of their own; `--stage prepare|reference|stream|digest` runs them one at a
+  time, with the same `PYTHONHASHSEED`, which keeps each command under two hours: the reference stage takes about 85
+  minutes; `--num-prompts`, `--decode-steps`, `--configurations` and `--skip-audit` are for development runs only), `python -m uv run python benchmarks/moonlight_profile.py --run <run> --configuration <name> --output <run>/profile-<name>.json [--trace]`
+  (one configuration per process), and `python -m uv run python benchmarks/moonlight_report.py <run> --compare <second run>`.
+  The tokenizer is the official one (`trust_remote_code`, tiktoken) at the pinned revision; its code was read before use.
 - Timing fields (`timings_ms`, `reference_ms`, `wall_ms`, `system`, `profile.json`) are recorded but
   excluded from digests. Runs that are compared for reproducibility must use the same source
   tree (`src`, `benchmarks`, `configs`; tests are not part of it).
@@ -111,3 +120,9 @@
   GEMM given a meta weight returned garbage instead of failing).
 - A checkpoint index records the publisher's file digests and is built from headers only;
   nothing proportional to the model is read or written to make it.
+- A model too large for host memory is compared with `StreamingReference` (decision 0008), which
+  imports nothing of Shardraw's storage, transfer, materialization or expert adapters
+  (`tests/test_layering.py`), and is itself checked against `from_pretrained` where that fits.
+- A bounded experts call keeps the experts implementation's own combine, once per call; never
+  combine per chunk. A new experts implementation or GPU needs the chunked-equals-unchunked tests
+  (per-group GEMM independence is a property of the kernel, not of the algorithm).

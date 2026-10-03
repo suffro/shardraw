@@ -50,6 +50,7 @@ class MaterializationStats:
     fetched_rows: int = 0  # served by the store (not the cache)
     fetched_bytes: int = 0
     device_copy_bytes: int = 0  # bytes copied on the device to assemble a request from cached pages
+    largest_request_bytes: int = 0  # the largest single request (rows × row bytes)
 
     def reset(self) -> None:
         self.__init__()
@@ -103,6 +104,7 @@ class MaterializationBackend:
         self.stats.requests += 1
         self.stats.rows += count
         self.stats.requested_bytes += count * info.row_bytes
+        self.stats.largest_request_bytes = max(self.stats.largest_request_bytes, count * info.row_bytes)
         if self.resident:
             self.stats.fetched_rows += count
             self.stats.fetched_bytes += count * info.row_bytes
