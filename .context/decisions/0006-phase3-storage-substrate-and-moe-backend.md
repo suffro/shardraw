@@ -210,7 +210,8 @@ Full report: `history/2026-10-02-awpmi-phase3-report.md`.
 - *A compact, remapped expert call* (slot ids in place of expert ids). Its exactness would depend
   on how each experts implementation orders its work: eager accumulates expert outputs in loop
   order. It is the next step for DeepSeek-class layers, where full-shape buffers do not fit
-  (E × expert bytes = 11 GB per DeepSeek-V3 layer).
+  (E × expert bytes = 11 GB per DeepSeek-V3 layer). **Adopted in decision 0007 (Phase 4A)**, with
+  slots in ascending expert order, which keeps eager, `grouped_mm` and `batched_mm` bit for bit.
 - *Speculative next-layer prefetch now.* It is measured instead (point 12).
 - *DeepSeek-class directly.* The user ruled it out until the generic storage and MoE
   abstractions work.

@@ -1393,6 +1393,16 @@ certificate
 
 This is a later research direction, not an initial dependency.
 
+**Status (2026-10-03).** Two milestones have realized the "expert materialization" box of this
+diagram, without the AWPMI refinement inside experts:
+
+- Phase 3 (decision 0006): an expert cache and router-driven reads.
+- Phase 4A (decision 0007), a milestone the user added outside the four phases: a model whose
+  experts exceed the GPU (OLMoE-1B-7B), with compact expert calls and split checkpoints read in
+  place, bit for bit equal to the fully materialized reference.
+
+The scheduling, optimization and evaluation items of this Phase 4 are not started.
+
 ---
 
 # 5. Final repository structure

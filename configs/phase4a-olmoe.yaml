@@ -1,0 +1,94 @@
+# AWPMI Phase 4A: the first real out-of-VRAM mixture of experts (decision 0007).
+
+model:
+  # OLMoE-1B-7B (Apache 2.0): 16 layers of 64 experts, 8 routed per token, 6.9 B parameters of
+  # which 12.9 GB of BF16 experts, more than this 8 GB GPU. The 0924 checkpoint is stored in BF16,
+  # the reference dtype, so its expert bytes are streamed as published (the 0125 base checkpoint
+  # is stored in FP32). Every expert is three separate tensors in the checkpoint; transformers fuses
+  # gate and up, and Shardraw reads them in place through a composed-segment index.
+  repository: allenai/OLMoE-1B-7B-0924
+  revision: 6d84c48581ece794365f2b8e9cfb043c68ade9c5
+  dtype: bfloat16
+  adapter: olmoe              # awpmi.models.olmoe: checked checkpoint layout, routers, reference profile
+
+prompts:
+  # The Phase 1 wikitext prompts, decoded with their tokenizer and re-tokenized for this model.
+  source_run: experiments/phase1/cs-column-baseline-run1
+  num_prompts: 40
+  max_prompt_tokens: 128
+  decode_steps: 12          # greedy tokens after the prompt, with the KV cache
+
+index:
+  directory: packs/olmoe-1b-7b-0924-expert-index
+
+storage:
+  alignment: 4096
+  max_gap: 0
+  workers: 8
+  max_read_bytes: 1048576
+  max_extent_bytes: 8388608
+  # 32 MiB staging slots (Phase 3 used 8 MiB): an expert is 12 MiB, and the profile showed a decode
+  # step paying for 384 slot-sized pieces; with 32 MiB it is 80, and the drive reaches its peak.
+  slot_bytes: 33554432
+  slots: 2
+
+# The streamed process runs under this device-memory cap (torch's allocator limit), below both the
+# experts (12.9 GB) and the card (8.6 GB): Gate A.
+gpu_budget_bytes: 6000000000
+
+reference:
+  # The fully materialized reference cannot be resident on this GPU. It runs in its own process with
+  # the transformers model loaded as published (every weight in host memory), each experts layer
+  # copied whole to the device before it runs (awpmi.models.moe.FullLayerOffload). The experts of
+  # `resident_layers` stay on the device: where the bytes live must not change any result, which the
+  # first `residency_check_prompts` check by also running with every layer offloaded.
+  resident_layers: [0, 1, 2, 3, 4]
+  residency_check_prompts: 2
+  pin_host_experts: true
+
+# Every configuration serves the experts from the drive through the compact call; a cache persists
+# across the prompts of its configuration and starts empty. cache_fraction: the device expert
+# cache's budget as a fraction of all expert bytes.
+configurations:
+  - {name: stream, cache_fraction: 0.0}
+  - {name: lru-12, cache_fraction: 0.125, policy: lru}
+  - {name: lru-25, cache_fraction: 0.25, policy: lru}
+  - {name: hotness-25, cache_fraction: 0.25, policy: hotness}
+  # Dense layer streaming (every expert of every layer for every forward): the bytes of streaming
+  # every expert. Expensive, so on the first prompts only.
+  - {name: all-experts, all_experts: true, num_prompts: 3, decode_steps: 2}
+
+hotness_half_life: 1024
+poison_prompts: 3           # the first prompts of the first configuration add NaN spare slots
+record_ranges_prompts: 5    # raw physical-I/O traces (every extent read) for the first prompts of each configuration
+
+timing:
+  settle_seconds: 3
+  warmup_prompts: 1
+
+# Gates, fixed before the full runs (benchmarks/olmoe_report.py evaluates them).
+gate:
+  # Correctness, hard checks on every step of every configuration, prefill and decode: the token,
+  # the logits, the whole KV cache and the routed experts, and per layer the router logits, the
+  # top-k indices and weights, every (token, expert) output before weighting (the direct check)
+  # and the experts module's output, all equal to the reference's; every step's storage and
+  # compact-buffer audit holds. Also: the source files' sha256 equal the Hub's, every expert row of
+  # the index equals the loader's own tensors, and the residency check agrees on every step.
+  #
+  # A (out of VRAM): the expert bytes exceed both the device-memory cap the streamed process runs
+  # under (gpu_budget_bytes) and the device's total memory, and every configuration completes.
+  #
+  # B (selective physical I/O): per decode token without a cache, the bytes read from the drive are
+  # at most this fraction of all expert bytes (8 of 64 experts per layer is 0.125), and below this
+  # fraction of what streaming every expert reads (the all-experts configuration).
+  max_decode_drive_fraction_without_cache: 0.15
+  max_decode_drive_ratio_to_all_experts: 0.20
+  #
+  # C (compact device residency): every step's compact buffers hold exactly its served experts
+  # (audited), and on decode steps they stay within this fraction of one layer's experts (8 of 64
+  # plus 2 poison spares is 0.156); the expert working set (compact buffers + cache) stays within the
+  # cache's capacity plus one layer's compact buffers.
+  max_decode_compact_fraction_of_layer: 0.20
+  #
+  # D (model-general core): tests/test_layering.py passes: the storage, transfer and materialization
+  # core names no model, tensor layout or router, and imports nothing above it.

@@ -1,0 +1,38 @@
+{
+  "timings_ms": {
+    "verify_files": 32705.054600024596,
+    "load": 14568.993899971247,
+    "index_audit": 12497.74260004051,
+    "all_offloaded": 59039.87400000915,
+    "resident": 813609.8868001718
+  },
+  "memory_after_load": {
+    "resident_bytes": 14836711424,
+    "peak_resident_bytes": 15113011200,
+    "private_bytes": 16530903040
+  },
+  "non_expert_device_bytes": 953422336,
+  "all_offloaded_device_bytes": 953422848,
+  "all_offloaded_peak_device_bytes": 1817596928,
+  "all_offloaded_copied_bytes": 335007449088,
+  "resident_device_bytes": 5013509120,
+  "resident_peak_device_bytes": 5859162112,
+  "resident_copied_bytes": 4606352424960,
+  "residency_checked_steps": 26,
+  "memory_peak": {
+    "resident_bytes": 10640429056,
+    "peak_resident_bytes": 15113011200,
+    "private_bytes": 17010941952
+  },
+  "profile": {
+    "kind": "bf16_reference",
+    "weight_dtype": "BF16",
+    "compute_dtype": "bfloat16",
+    "experts_implementation": "grouped_mm",
+    "attention_implementation": "sdpa",
+    "numerics": "awpmi.runtime.configure_reproducible_numerics",
+    "quantization": {}
+  },
+  "experts_implementation": "grouped_mm",
+  "attention_implementation": "sdpa"
+}

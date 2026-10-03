@@ -1,0 +1,58 @@
+{
+  "model": {
+    "repository": "allenai/OLMoE-1B-7B-0924",
+    "revision": "6d84c48581ece794365f2b8e9cfb043c68ade9c5",
+    "dtype": "bfloat16",
+    "device": "cuda"
+  },
+  "python": "3.13.3 (tags/v3.13.3:6280bb5, Apr  8 2025, 14:47:33) [MSC v.1943 64 bit (AMD64)]",
+  "os": "Windows-11-10.0.26200-SP0",
+  "packages": {
+    "torch": "2.14.1+cu130",
+    "transformers": "5.18.0",
+    "safetensors": "0.8.0",
+    "numpy": "2.5.3",
+    "huggingface-hub": "1.33.0",
+    "tokenizers": "0.23.2",
+    "pyarrow": "25.0.1"
+  },
+  "cuda_version": "13.0",
+  "cudnn_version": 92400,
+  "gpu": "NVIDIA GeForce RTX 4060 Ti",
+  "numerics": {
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "deterministic_algorithms": true,
+    "float32_matmul_precision": "highest",
+    "cuda_matmul_allow_tf32": false,
+    "cudnn_allow_tf32": false,
+    "cuda_matmul_allow_bf16_reduced_precision_reduction": false,
+    "cuda_matmul_allow_fp16_reduced_precision_reduction": false,
+    "cuda_matmul_allow_bf16_reduced_precision_reduction_split_k": true,
+    "cuda_matmul_allow_fp16_accumulation": false
+  },
+  "git_commit": "51f7e5cb893226a8ac359217a499c3ad5a9242c7",
+  "git_dirty": true,
+  "source_tree_sha256": "ccffba4ec609233315a16c70b8fe91501966c318eb285685b8414937eb82f21f",
+  "uv_lock_sha256": "ff3460f90d6223fcdfb52ab880cfcb018fc2591f12793de929a31b858546ecc9",
+  "num_prompts": 40,
+  "python_hash_seed": "2",
+  "profile": {
+    "kind": "bf16_reference",
+    "weight_dtype": "BF16",
+    "compute_dtype": "bfloat16",
+    "experts_implementation": "grouped_mm",
+    "attention_implementation": "sdpa",
+    "numerics": "awpmi.runtime.configure_reproducible_numerics",
+    "quantization": {}
+  },
+  "started_at": "2026-10-03T13:25:15+0200",
+  "storage": {
+    "disk": {
+      "model": "Samsung SSD 990 PRO with Heatsink 1TB",
+      "bus": "NVMe",
+      "media": "SSD",
+      "logical_sector": 512,
+      "physical_sector": 4096
+    }
+  }
+}

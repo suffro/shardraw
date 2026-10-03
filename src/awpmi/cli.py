@@ -2,16 +2,22 @@
 
     uv run awpmi pack lm-head [--config configs/phase3-storage.yaml] [--output DIR]
     uv run awpmi pack experts [--config configs/phase3-moe.yaml] [--output DIR]
+    uv run awpmi pack expert-index [--config configs/phase4a-olmoe.yaml] [--output DIR]
 
-lm-head  the refinement pack of the configured decomposition of a model's LM head: level records
-         and remainder norms in an AWPMI safetensors file, exact rows referring to the published
-         checkpoint tensor (checked byte for byte against the model's LM-head weight).
-experts  the expert pack of a mixture-of-experts model: every expert-sliced parameter, referring
-         to the published checkpoint wherever it holds the same bytes.
+lm-head       the refinement pack of the configured decomposition of a model's LM head: level
+              records and remainder norms in an AWPMI safetensors file, exact rows referring to
+              the published checkpoint tensor (checked byte for byte against the model's LM-head
+              weight).
+experts       the expert pack of a mixture-of-experts model: every expert-sliced parameter,
+              referring to the published checkpoint wherever it holds the same bytes.
+expert-index  the expert index of a checkpoint that stores each expert as separate tensors
+              (decision 0007): one composed segment per expert-sliced parameter, its rows the byte
+              ranges of the published tensors. Built from the safetensors headers and the model's
+              skeleton on `meta` (through the configured adapter's layout); no weight byte is read
+              or written. Source files carry the sha256 the Hub declares.
 
-Either writes `manifest.json` (files with sizes and sha256, segments with offsets and sha256,
-source model and revision, packing configuration) and prints a summary. The benchmarks re-open
-packs with every segment re-hashed.
+Each writes `manifest.json` (files with sizes and sha256, segments with their location and,
+when computed, sha256; source model and revision; packing configuration) and prints a summary.
 """
 
 from __future__ import annotations
@@ -66,18 +72,54 @@ def pack_experts(config_path: Path, output: Path | None) -> dict:
     return pack.manifest
 
 
+def model_skeleton(model_config: dict):
+    """The configured model on `meta` (no weights) and its adapter module, if any."""
+    import importlib
+
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[model_config["dtype"]]
+    config = AutoConfig.from_pretrained(model_config["repository"], revision=model_config["revision"])
+    with torch.device("meta"):
+        model = AutoModelForCausalLM.from_config(config, dtype=dtype)
+    adapter = importlib.import_module(f"awpmi.models.{model_config['adapter']}") if model_config.get("adapter") else None
+    return model, adapter
+
+
+def pack_expert_index(config_path: Path, output: Path | None) -> dict:
+    from awpmi.models import checkpoint
+
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    model_config = raw["model"]
+    model, adapter = model_skeleton(model_config)
+    sources = adapter.expert_sources(model) if adapter is not None and hasattr(adapter, "expert_sources") else None
+    files = checkpoint.checkpoint_sources(model_config["repository"], model_config["revision"])
+    missing = [key for key, entry in files.items() if entry.sha256 is None]
+    if missing:
+        raise RuntimeError(f"the Hub declares no sha256 for {missing}: cannot record their identity")
+    directory = output or REPO_ROOT / raw["index"]["directory"]
+    pack = checkpoint.write_expert_index(
+        model, directory, files, packing={"tool": "awpmi pack expert-index", "config": config_path.name},
+        metadata={"model": {k: model_config[k] for k in ("repository", "revision", "dtype")}, "adapter": model_config.get("adapter")},
+        sources=sources,
+    )
+    return pack.manifest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="awpmi", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     pack = commands.add_parser("pack", help="write a pack and its manifest")
-    pack.add_argument("kind", choices=["lm-head", "experts"])
+    pack.add_argument("kind", choices=["lm-head", "experts", "expert-index"])
     pack.add_argument("--config", default=None)
     pack.add_argument("--output", default=None, help="pack directory (default: the config's)")
     args = parser.parse_args(argv)
-    default = {"lm-head": "phase3-storage.yaml", "experts": "phase3-moe.yaml"}[args.kind]
+    default = {"lm-head": "phase3-storage.yaml", "experts": "phase3-moe.yaml", "expert-index": "phase4a-olmoe.yaml"}[args.kind]
     config = Path(args.config) if args.config else REPO_ROOT / "configs" / default
     output = Path(args.output) if args.output else None
-    manifest = (pack_lm_head if args.kind == "lm-head" else pack_experts)(config, output)
+    writer = {"lm-head": pack_lm_head, "experts": pack_experts, "expert-index": pack_expert_index}[args.kind]
+    manifest = writer(config, output)
     summary = {
         "kind": manifest["kind"],
         "files": {key: {k: v for k, v in entry.items() if k != "sha256"} for key, entry in manifest["files"].items()},

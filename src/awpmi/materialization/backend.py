@@ -12,6 +12,18 @@ A whole-segment request is one cache entry; a request for some rows looks rows u
 and also serves them from a cached whole segment. Every request is counted: rows and bytes
 requested, served from the cache, fetched from storage; the store's and the streamer's own
 counters give the physical bytes, reads and copies behind them.
+
+`materialize(..., out=buffer)` writes the rows into a caller's device buffer instead (decision
+0007: an expert layer's compact buffers). Cached rows are copied first, on the compute
+stream, so those copies run while storage reads the rest ("hits first"); the rest are
+streamed straight into their rows of the buffer, and a copy of each is offered to the cache.
+
+On CUDA, cache entries are allocated from a memory pool of their own. Long-lived pages
+scattered among short-lived buffers of varying sizes (an expert layer's compact buffers)
+fragment the caching allocator: under a device budget, the first Phase 4A runs failed with
+1.6 GiB reserved but unusable. In their own pool, pages reuse each other's memory and stay
+within the cache's budget, and the rest of device memory remains contiguous for the working
+buffers.
 """
 
 from __future__ import annotations
@@ -21,7 +33,7 @@ from dataclasses import dataclass
 import torch
 
 from awpmi.storage.cache import PageCache
-from awpmi.storage.layout import Segment
+from awpmi.storage.layout import AnySegment
 from awpmi.storage.store import PageStore
 from awpmi.streaming.streamer import PageStreamer, Ticket, resolve_device
 
@@ -63,82 +75,105 @@ class MaterializationBackend:
             raise ValueError("the streamer must deliver to the compute device")
         self.streamer = streamer
         self.cache = None if self.resident else cache
+        self._cache_pool = torch.cuda.MemPool() if self.cache is not None and self.device.type == "cuda" else None
         self.stats = MaterializationStats()
 
-    def segment(self, name: str) -> Segment:
+    def _cache_copy(self, tensor: torch.Tensor) -> torch.Tensor:
+        """A copy of `tensor` for the cache, allocated from the cache's own memory pool."""
+        if self._cache_pool is None:
+            return tensor.clone()
+        with torch.cuda.use_mem_pool(self._cache_pool):
+            return tensor.clone()
+
+    def segment(self, name: str) -> AnySegment:
         return self.store.segment(name)
 
     # Requests
 
-    def materialize(self, segment: str, rows: torch.Tensor | None = None) -> torch.Tensor:
-        """Rows of `segment` on the device ([n, row_bytes] uint8, ascending rows). Read-only."""
+    def materialize(self, segment: str, rows: torch.Tensor | None = None, out: torch.Tensor | None = None) -> torch.Tensor:
+        """Rows of `segment` on the device ([n, row_bytes] uint8, ascending rows). Read-only.
+
+        With `out` (contiguous uint8 [n, row_bytes] on the device), the rows are written into it
+        and `out` is returned.
+        """
         info = self.store.segment(segment)
         count = info.rows if rows is None else rows.numel()
+        if out is not None and (out.dtype != torch.uint8 or tuple(out.shape) != (count, info.row_bytes) or not out.is_contiguous()):
+            raise ValueError(f"out must be contiguous uint8 [{count}, {info.row_bytes}]")
         self.stats.requests += 1
         self.stats.rows += count
         self.stats.requested_bytes += count * info.row_bytes
         if self.resident:
             self.stats.fetched_rows += count
             self.stats.fetched_bytes += count * info.row_bytes
-            return self.store.read_rows(segment, rows)
+            data = self.store.read_rows(segment, rows)
+            return data if out is None else out.copy_(data)
         if self.cache is None:
-            return self._fetch(info, rows)
+            return self._fetch(info, rows, out)
         whole = self.cache.peek((segment, WHOLE_SEGMENT))
         if rows is None:
             entry = self.cache.get((segment, WHOLE_SEGMENT), info.nbytes)
             if entry is not None:
                 self._hit(info, info.rows)
-                return entry
-            data = self._fetch(info, None)
-            self.cache.put((segment, WHOLE_SEGMENT), data)
+                if out is None:
+                    return entry
+                self.stats.device_copy_bytes += info.nbytes
+                return out.copy_(entry)
+            data = self._fetch(info, None, out)
+            if self.cache.can_admit(info.nbytes):
+                self.cache.put((segment, WHOLE_SEGMENT), self._cache_copy(data))
+            else:
+                self.cache.bypass(1, info.nbytes)
             return data
         if whole is not None:
             self.cache.get((segment, WHOLE_SEGMENT), count * info.row_bytes)
             self._hit(info, count)
-            data = whole.index_select(0, rows.to(self.device))
+            index = rows.to(self.device)
+            data = whole.index_select(0, index) if out is None else torch.index_select(whole, 0, index, out=out)
             self.stats.device_copy_bytes += count * info.row_bytes
             return data
-        return self._rows_through_cache(info, rows)
+        return self._rows_through_cache(info, rows, out)
 
-    def _rows_through_cache(self, info: Segment, rows: torch.Tensor) -> torch.Tensor:
+    def _rows_through_cache(self, info: AnySegment, rows: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
         if not self.cache.holds(info.name) and not self.cache.can_admit(info.row_bytes):
             # No row of this segment is cached, and none could be: every row misses and is not kept.
             count = rows.numel()
             self.cache.count_misses(count, count * info.row_bytes)
             self.cache.bypass(count, count * info.row_bytes)
-            return self._fetch(info, rows)
+            return self._fetch(info, rows, out)
         row_list = rows.reshape(-1).tolist()
         cached = self.cache.get_many([(info.name, row) for row in row_list], info.row_bytes)
         missing = [k for k, entry in enumerate(cached) if entry is None]
         hits = len(row_list) - len(missing)
         self._hit(info, hits)
-        fetched = None
+        if out is None:
+            out = torch.empty(len(row_list), info.row_bytes, dtype=torch.uint8, device=self.device)
+        # Hits first: their device copies are queued before storage is asked for the misses.
+        for k, entry in enumerate(cached):
+            if entry is not None:
+                out[k].copy_(entry)
+        self.stats.device_copy_bytes += hits * info.row_bytes
         if missing:
-            fetched = self._fetch(info, torch.tensor([row_list[k] for k in missing], dtype=torch.int64))
+            positions = torch.tensor(missing, dtype=torch.int64)
+            self._fetch(info, torch.tensor([row_list[k] for k in missing], dtype=torch.int64), out, positions)
             if self.cache.can_admit(info.row_bytes):
-                for k, position in enumerate(missing):
-                    self.cache.put((info.name, row_list[position]), fetched[k].clone())
+                for position in missing:
+                    self.cache.put((info.name, row_list[position]), self._cache_copy(out[position]))
             else:
                 self.cache.bypass(len(missing), len(missing) * info.row_bytes)
-            if not hits:
-                return fetched
-        out = torch.empty(len(row_list), info.row_bytes, dtype=torch.uint8, device=self.device)
-        if missing:
-            out.index_copy_(0, torch.tensor(missing, device=self.device), fetched)
-        present = [k for k, entry in enumerate(cached) if entry is not None]
-        out.index_copy_(0, torch.tensor(present, device=self.device), torch.stack([cached[k] for k in present]))
-        self.stats.device_copy_bytes += hits * info.row_bytes
         return out
 
-    def _hit(self, info: Segment, rows: int) -> None:
+    def _hit(self, info: AnySegment, rows: int) -> None:
         self.stats.cache_hit_rows += rows
         self.stats.cache_hit_bytes += rows * info.row_bytes
 
-    def _fetch(self, info: Segment, rows: torch.Tensor | None) -> torch.Tensor:
+    def _fetch(
+        self, info: AnySegment, rows: torch.Tensor | None, out: torch.Tensor | None = None, positions: torch.Tensor | None = None
+    ) -> torch.Tensor:
         count = info.rows if rows is None else rows.numel()
         self.stats.fetched_rows += count
         self.stats.fetched_bytes += count * info.row_bytes
-        return self.streamer.fetch(self.store, info.name, rows)
+        return self.streamer.fetch(self.store, info.name, rows, out, positions)
 
     def pin(self, segment: str) -> None:
         """Keep a whole segment resident in the cache (fetched now, never evicted)."""
@@ -148,7 +183,7 @@ class MaterializationBackend:
         key = (segment, WHOLE_SEGMENT)
         if key not in self.cache:
             data = self._fetch(info, None)
-            self.cache.pin(key, data)
+            self.cache.pin(key, self._cache_copy(data) if self._cache_pool is not None else data)
         else:
             self.cache.pin(key, self.cache.peek(key))
 

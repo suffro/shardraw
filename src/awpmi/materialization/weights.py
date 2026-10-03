@@ -3,8 +3,10 @@
 `WeightStore.rows(name, rows)` is a weight's rows as tensors of the weight's dtype and row
 shape. `ExpertStore` serves mixture-of-experts layers: a group is one layer's expert-sliced
 parameters (each a segment with one row per expert); `load` returns the requested experts'
-slices and `fill` writes them into caller-owned full-shape buffers at their expert indices.
-Group keys and parameter names are whatever the model adapter registers.
+slices, `fill` writes them into caller-owned full-shape buffers at their expert indices, and
+`assemble` writes them into caller-owned compact buffers, row i holding the i-th requested
+expert (decision 0007). Group keys and parameter names are whatever the model adapter
+registers.
 """
 
 from __future__ import annotations
@@ -15,14 +17,14 @@ from dataclasses import dataclass
 import torch
 
 from awpmi.materialization.backend import MaterializationBackend
-from awpmi.storage.layout import Segment, typed_rows
+from awpmi.storage.layout import AnySegment, row_bytes_of, typed_rows
 
 
 class WeightStore:
     def __init__(self, backend: MaterializationBackend) -> None:
         self.backend = backend
 
-    def segment(self, name: str) -> Segment:
+    def segment(self, name: str) -> AnySegment:
         return self.backend.segment(name)
 
     def rows(self, name: str, rows: torch.Tensor | None = None) -> torch.Tensor:
@@ -60,3 +62,19 @@ class ExpertStore:
         index = experts.to(next(iter(buffers.values())).device)
         for name, data in self.load(key, experts).items():
             buffers[name].index_copy_(0, index, data)
+
+    def assemble(self, key: str, experts: torch.Tensor, buffers: Mapping[str, torch.Tensor]) -> None:
+        """Write the slices of `experts` (ascending, unique) into the first rows of `buffers[name]`, in that order.
+
+        Each buffer is a contiguous device tensor [≥ n, *row_shape] of the parameter's dtype;
+        rows beyond n are left as they are.
+        """
+        group = self.groups[key]
+        count = experts.numel()
+        for name, segment in group.segments.items():
+            info = self.weights.segment(segment)
+            buffer = buffers[name]
+            if buffer.dtype != info.torch_dtype or tuple(buffer.shape[1:]) != info.row_shape or buffer.shape[0] < count:
+                raise ValueError(f"{key}.{name}: expected a buffer [>= {count}, {info.row_shape}] of {info.torch_dtype}")
+            if count:
+                self.weights.backend.materialize(segment, experts, out=row_bytes_of(buffer[:count]))

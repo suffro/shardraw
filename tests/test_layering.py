@@ -1,4 +1,4 @@
-"""Phase 3 layering (decision 0006): the storage core knows no model and no certificate; certification knows no storage."""
+"""Layering (decisions 0006, 0007): the storage core knows no model and no certificate; certification knows no storage."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ CORE = ("storage", "streaming", "materialization")
 # Names that would tie the core to one model, one tensor layout or one routing implementation.
 MODEL_WORDS = re.compile(
     r"smollm|granite|llama|mixtral|qwen|deepseek|olmoe|gpt.?oss|lm_head|embed_tokens|gate_up_proj|down_proj|"
-    r"block_sparse_moe|router|top_k_index",
+    r"gate_proj|up_proj|block_sparse_moe|router|top_k_index|num_experts|safetensors\.index",
     re.IGNORECASE,
 )
 CORE_FORBIDDEN_IMPORTS = re.compile(

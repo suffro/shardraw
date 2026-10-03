@@ -14,6 +14,11 @@ touch or lie within `max_gap` bytes of each other into *extents*. A file-backed 
 the extents and nothing else, so a row that was not requested is read only when it shares
 an aligned block (or a merged gap) with a requested one, and it is never handed out.
 
+A composed segment's row is several spans, possibly in several files (decision 0007): its
+runs are its spans (merged where file and output are both contiguous), sorted by file and
+offset; extents never cross files. Every run carries its output offset, so the requested
+rows can also be written to chosen rows of a caller's buffer (`positions`).
+
 `IOStats` counts, per store: requests, rows and logical bytes (the requested rows), physical
 bytes (the extents actually read), read calls, extents, the distinct 4 KiB blocks of the
 requested rows (the block accounting of decisions 0003 and 0004), host time in reads, and
@@ -32,7 +37,7 @@ from pathlib import Path
 import torch
 
 from awpmi.storage.fileio import DIRECT_ALIGNMENT, PositionedFile, aligned_host_buffer, os_read_counters
-from awpmi.storage.layout import DTYPE_NAMES, Segment, row_bytes_of
+from awpmi.storage.layout import DTYPE_NAMES, AnySegment, ComposedSegment, Segment, row_bytes_of
 
 IO_BLOCK_BYTES = 4096
 DEFAULT_MAX_EXTENT_BYTES = 8 << 20
@@ -41,7 +46,7 @@ _SLICE_BYTES = 64 * 1024
 _BYTE_GATHER_PARTS = 256
 
 
-def check_rows(rows: torch.Tensor | None, segment: Segment) -> torch.Tensor | None:
+def check_rows(rows: torch.Tensor | None, segment: AnySegment) -> torch.Tensor | None:
     """Requested rows as a CPU int64 vector, ascending and unique, within the segment (None: every row)."""
     if rows is None:
         return None
@@ -58,16 +63,24 @@ def check_rows(rows: torch.Tensor | None, segment: Segment) -> torch.Tensor | No
 class ReadPlan:
     """The extents a file-backed read of `rows` of `segment` must read, and where every requested byte is.
 
-    runs     int64 [R, 4]: (file offset, length, output offset, extent) of each run of consecutive rows
-    extents  int64 [E, 2]: (file offset, length), aligned, ascending, disjoint
+    runs          int64 [R, 4]: (file offset, length, output offset, extent) of each run, sorted by
+                  (file, offset); runs never overlap
+    extents       int64 [E, 2]: (file offset, length), aligned; ascending and disjoint within a file
+    files         the file keys the plan reads; run_files [R] and extent_files [E] index them
+    output_rows   rows of the output buffer the runs write into (the request count, unless
+                  `positions` scattered the rows into a larger buffer)
     """
 
-    segment: Segment
+    segment: AnySegment
     rows: torch.Tensor | None
     row_count: int
     runs: torch.Tensor
     extents: torch.Tensor
     alignment: int
+    files: tuple[str, ...]
+    run_files: torch.Tensor
+    extent_files: torch.Tensor
+    output_rows: int
 
     @property
     def logical_bytes(self) -> int:
@@ -80,62 +93,79 @@ class ReadPlan:
     @property
     def blocks_4k(self) -> int:
         """Distinct 4 KiB blocks that hold a requested byte (independent of this plan's alignment and gap)."""
-        return _distinct_blocks(self.runs, IO_BLOCK_BYTES)
+        return _distinct_blocks(self.runs, IO_BLOCK_BYTES, self.run_files)
 
 
-def _distinct_blocks(runs: torch.Tensor, block: int) -> int:
+def _distinct_blocks(runs: torch.Tensor, block: int, run_files: torch.Tensor | None = None) -> int:
     if not runs.numel():
         return 0
     first = runs[:, 0] // block
     last = (runs[:, 0] + runs[:, 1] - 1) // block
     blocks = int((last - first + 1).sum())
-    # Consecutive runs (ascending, disjoint) can share at most a boundary block.
-    return blocks - int((first[1:] == last[:-1]).sum())
+    # Consecutive runs (ascending, disjoint) of one file can share at most a boundary block.
+    shared = first[1:] == last[:-1]
+    if run_files is not None:
+        shared &= run_files[1:] == run_files[:-1]
+    return blocks - int(shared.sum())
 
 
 def plan_reads(
-    segment: Segment,
+    segment: AnySegment,
     rows: torch.Tensor | None,
     alignment: int = DIRECT_ALIGNMENT,
     max_gap: int = 0,
     max_extent_bytes: int = DEFAULT_MAX_EXTENT_BYTES,
+    positions: torch.Tensor | None = None,
 ) -> ReadPlan:
     """Runs and aligned extents for a read of `rows` (checked by `check_rows`) of `segment`.
 
-    Runs merge into one extent when their aligned ranges overlap, touch, or are at most
-    `max_gap` bytes apart, as long as the extent stays within `max_extent_bytes` (a single
-    run longer than that is an extent of its own).
+    Runs merge into one extent when they are in the same file and their aligned ranges
+    overlap, touch, or are at most `max_gap` bytes apart, as long as the extent stays within
+    `max_extent_bytes` (a single run longer than that is an extent of its own). Request i is
+    written to output row `positions[i]` (default i).
     """
     if alignment <= 0 or max_gap < 0 or max_gap % alignment or max_extent_bytes < alignment:
         raise ValueError("bad alignment, gap or extent limit")
-    if rows is None:
-        first_rows = torch.zeros(1, dtype=torch.int64)
-        counts = torch.tensor([segment.rows], dtype=torch.int64)
-        row_count = segment.rows
+    row_count = segment.rows if rows is None else rows.numel()
+    if positions is None:
+        output_rows = row_count
     else:
-        row_count = rows.numel()
-        if row_count == 0:
-            empty = torch.zeros(0, 4, dtype=torch.int64)
-            return ReadPlan(segment, rows, 0, empty, torch.zeros(0, 2, dtype=torch.int64), alignment)
-        starts = torch.cat([torch.zeros(1, dtype=torch.int64), (rows[1:] != rows[:-1] + 1).nonzero().squeeze(1) + 1])
-        stops = torch.cat([starts[1:], torch.tensor([row_count])])
-        first_rows, counts = rows[starts], stops - starts
-    offsets = segment.offset + first_rows * segment.row_bytes
-    lengths = counts * segment.row_bytes
-    outputs = torch.cumsum(lengths, 0) - lengths
+        positions = positions.reshape(-1).to("cpu", torch.int64)
+        if positions.numel() != row_count or (row_count and int(positions.min()) < 0):
+            raise ValueError("one non-negative position per requested row")
+        output_rows = int(positions.max()) + 1 if row_count else 0
+        if row_count > 1 and int(torch.unique(positions).numel()) != row_count:
+            raise ValueError("positions must be distinct")
+    files = segment.files
+    found = segment.byte_runs(rows, positions)
+    if not found.shape[0]:
+        empty = torch.zeros(0, dtype=torch.int64)
+        return ReadPlan(
+            segment, rows, 0, torch.zeros(0, 4, dtype=torch.int64), torch.zeros(0, 2, dtype=torch.int64), alignment,
+            files, empty, empty, output_rows,
+        )
+    # Sort by (file, offset); stable, so a plain segment's runs (already ascending) keep their order.
+    order = torch.sort(found[:, 1], stable=True).indices
+    order = order[torch.sort(found[order, 0], stable=True).indices]
+    run_file, offsets, lengths, outputs = found[order].unbind(1)
+    same_file = run_file[1:] == run_file[:-1]
+    if bool((same_file & (offsets[1:] < offsets[:-1] + lengths[:-1])).any()):
+        raise ValueError(f"{segment.name}: the requested rows overlap in their file")
     begin = offsets // alignment * alignment
     end = (offsets + lengths + alignment - 1) // alignment * alignment
     new = torch.ones_like(begin, dtype=torch.bool)
-    new[1:] = begin[1:] > end[:-1] + max_gap
+    new[1:] = ~same_file | (begin[1:] > end[:-1] + max_gap)
     extent_of_run = torch.cumsum(new.long(), 0) - 1
     group_first = new.nonzero().squeeze(1)
     group_last = torch.cat([group_first[1:] - 1, torch.tensor([begin.numel() - 1])])
     extent_begin, extent_end = begin[group_first], end[group_last]
     if bool(((extent_end - extent_begin) > max_extent_bytes).any()):
         extent_of_run, extent_begin, extent_end = _split_long_extents(begin, end, new, max_extent_bytes)
+    extent_files = torch.zeros(extent_begin.numel(), dtype=torch.int64)
+    extent_files[extent_of_run] = run_file
     runs = torch.stack([offsets, lengths, outputs, extent_of_run], dim=1)
     extents = torch.stack([extent_begin, extent_end - extent_begin], dim=1)
-    return ReadPlan(segment, rows, row_count, runs, extents, alignment)
+    return ReadPlan(segment, rows, row_count, runs, extents, alignment, files, run_file, extent_files, output_rows)
 
 
 def _split_long_extents(begin, end, new, max_extent_bytes):
@@ -156,17 +186,26 @@ def _split_long_extents(begin, end, new, max_extent_bytes):
     return as_tensor(extent_of_run), as_tensor(extent_begin), as_tensor(extent_end)
 
 
-def gather_runs(staging: torch.Tensor, sources: torch.Tensor, lengths: torch.Tensor, out: torch.Tensor, row_bytes: int) -> None:
-    """Copy runs (byte offsets `sources` in `staging`, `lengths`) back to back into `out` (all uint8, 1-D).
+def gather_runs(
+    staging: torch.Tensor,
+    sources: torch.Tensor,
+    lengths: torch.Tensor,
+    out: torch.Tensor,
+    row_bytes: int,
+    destinations: torch.Tensor | None = None,
+) -> None:
+    """Copy runs (byte offsets `sources` in `staging`, `lengths`) into `out` (all uint8, 1-D).
 
-    Long runs are sliced. Short runs made of whole rows that start at a row boundary of
-    `out` are gathered row by row in one indexing operation; any other short run is
+    Run k goes to byte `destinations[k]` of `out`; by default the runs are written back to
+    back. Long runs are sliced. Short runs made of whole rows that start at a row boundary
+    of `out` are gathered row by row in one indexing operation; any other short run is
     gathered byte by byte, in batches.
     """
-    position = 0
+    if destinations is None:
+        destinations = torch.cumsum(lengths, 0) - lengths
     row_sources, row_positions = [], []
     byte_parts: list[tuple[int, int, int]] = []
-    for source, length in zip(sources.tolist(), lengths.tolist()):
+    for source, length, position in zip(sources.tolist(), lengths.tolist(), destinations.tolist()):
         if length >= _SLICE_BYTES:
             out[position : position + length].copy_(staging[source : source + length])
         elif length % row_bytes == 0 and position % row_bytes == 0:
@@ -175,7 +214,6 @@ def gather_runs(staging: torch.Tensor, sources: torch.Tensor, lengths: torch.Ten
             row_positions.extend(range(first, first + length // row_bytes))
         else:
             byte_parts.append((source, length, position))
-        position += length
     if row_sources:
         rows = staging.unfold(0, row_bytes, 1).index_select(0, torch.tensor(row_sources, dtype=torch.int64))
         whole = out[: out.numel() // row_bytes * row_bytes].view(-1, row_bytes)
@@ -353,12 +391,16 @@ class FileBackedPageStore(PageStore):
             raise ValueError(f"direct I/O needs a multiple of {DIRECT_ALIGNMENT}-byte alignment")
         if max_read_bytes % alignment or max_extent_bytes % alignment:
             raise ValueError("read and extent limits must be multiples of the alignment")
-        missing = {segment.file for segment in segments.values()} - set(files)
+        missing = {file for segment in segments.values() for file in segment.files} - set(files)
         if missing:
             raise KeyError(f"segments refer to unknown files {sorted(missing)}")
         self.files = {key: PositionedFile(path, direct) for key, path in files.items()}
+        sizes = {key: file.size for key, file in self.files.items()}
         for segment in segments.values():
-            if segment.offset + segment.nbytes > self.files[segment.file].size:
+            if isinstance(segment, ComposedSegment):
+                if not segment.spans_within(sizes):
+                    raise ValueError(f"{segment.name} has a span beyond the end of its file")
+            elif segment.offset + segment.nbytes > sizes[segment.file]:
                 raise ValueError(f"{segment.name} extends beyond {self.files[segment.file].path}")
         self.segments = dict(segments)
         self.device = torch.device("cpu")
@@ -371,45 +413,55 @@ class FileBackedPageStore(PageStore):
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="awpmi-io") if workers > 1 else None
         self.stats = IOStats()
 
-    def plan(self, segment: str, rows: torch.Tensor | None) -> ReadPlan:
+    def plan(self, segment: str, rows: torch.Tensor | None, positions: torch.Tensor | None = None) -> ReadPlan:
         info = self.segment(segment)
-        return plan_reads(info, check_rows(rows, info), self.alignment, self.max_gap, self.max_extent_bytes)
+        return plan_reads(info, check_rows(rows, info), self.alignment, self.max_gap, self.max_extent_bytes, positions)
 
     def count_plan(self, plan: ReadPlan) -> None:
         """Charge a plan's request to the stats; the bytes its reads return are charged by `read_extents`."""
         self.stats.count_request(plan.segment.name, plan.row_count, plan.logical_bytes, plan.blocks_4k)
 
-    def read_extents(self, plan: ReadPlan, extents: torch.Tensor, staging: torch.Tensor) -> None:
-        """Read `extents` ([k, 2] file offset, length) of `plan`'s file back to back into `staging` (uint8, aligned)."""
+    def read_extents(
+        self, plan: ReadPlan, extents: torch.Tensor, staging: torch.Tensor, extent_files: torch.Tensor | None = None
+    ) -> None:
+        """Read `extents` ([k, 2] file offset, length) back to back into `staging` (uint8, aligned).
+
+        `extent_files` ([k], indices into `plan.files`) says which file each extent is in; it may
+        be omitted when the plan reads one file.
+        """
         if extents.numel() == 0:
             return
-        file = self.files[plan.segment.file]
+        if extent_files is None:
+            if len(plan.files) != 1:
+                raise ValueError("a plan over several files needs the file of every extent")
+            extent_files = torch.zeros(extents.shape[0], dtype=torch.int64)
+        files = [self.files[key] for key in plan.files]
         base = staging.data_ptr()
         if self.direct and base % DIRECT_ALIGNMENT:
             raise ValueError("direct reads need an aligned staging buffer")
         calls = []
         position = 0
-        for offset, length in extents.tolist():
+        for (offset, length), index in zip(extents.tolist(), extent_files.tolist()):
             for start in range(0, length, self.max_read_bytes):
                 size = min(self.max_read_bytes, length - start)
-                calls.append((offset + start, size, base + position + start))
+                calls.append((files[index], offset + start, size, base + position + start))
             position += length
         if position > staging.numel():
             raise ValueError("staging buffer too small for these extents")
         before = os_read_counters()
         started = time.perf_counter()
         if self._pool is None or len(calls) == 1:
-            counts = [file.read_into(*call) for call in calls]
+            counts = [file.read_into(*call) for file, *call in calls]
         else:
             # One task per worker over an interleaved share of the calls: per-task overhead is paid once.
             tasks = min(self.workers, len(calls))
-            shares = list(self._pool.map(lambda k: [file.read_into(*call) for call in calls[k::tasks]], range(tasks)))
+            shares = list(self._pool.map(lambda k: [file.read_into(*call) for file, *call in calls[k::tasks]], range(tasks)))
             counts = [0] * len(calls)
             for k, share in enumerate(shares):
                 counts[k::tasks] = share
         self.stats.io_ms += (time.perf_counter() - started) * 1e3
         after = os_read_counters()
-        for (offset, size, _), count in zip(calls, counts):
+        for (file, offset, size, _), count in zip(calls, counts):
             if count < size and offset + count < min(file.size, offset + size):
                 raise OSError(f"short read of {file.path} at {offset}: {count} of {size} bytes")
         self.stats.read_calls += len(calls)
@@ -422,7 +474,9 @@ class FileBackedPageStore(PageStore):
             self.stats.os_read_calls += after[0] - before[0]
             self.stats.os_read_bytes += after[1] - before[1]
         if self.stats.ranges is not None:
-            self.stats.ranges.extend((plan.segment.file, int(o), int(n)) for o, n in extents.tolist())
+            self.stats.ranges.extend(
+                (plan.files[index], int(o), int(n)) for (o, n), index in zip(extents.tolist(), extent_files.tolist())
+            )
 
     def read_rows(self, segment: str, rows: torch.Tensor | None = None) -> torch.Tensor:
         """Plan, read every extent into a staging buffer and gather the rows (pageable host memory).
@@ -434,10 +488,10 @@ class FileBackedPageStore(PageStore):
         out = aligned_host_buffer(plan.logical_bytes, pin=False)
         if plan.row_count:
             staging = aligned_host_buffer(plan.physical_bytes, self.alignment, pin=False)
-            self.read_extents(plan, plan.extents, staging)
+            self.read_extents(plan, plan.extents, staging, plan.extent_files)
             starts = torch.cumsum(plan.extents[:, 1], 0) - plan.extents[:, 1]
             sources = starts[plan.runs[:, 3]] + plan.runs[:, 0] - plan.extents[plan.runs[:, 3], 0]
-            gather_runs(staging, sources, plan.runs[:, 1], out, plan.segment.row_bytes)
+            gather_runs(staging, sources, plan.runs[:, 1], out, plan.segment.row_bytes, plan.runs[:, 2])
         return out.view(plan.row_count, plan.segment.row_bytes)
 
     def close(self) -> None:

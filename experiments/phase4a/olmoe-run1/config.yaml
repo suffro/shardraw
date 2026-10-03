@@ -1,0 +1,56 @@
+model:
+  repository: allenai/OLMoE-1B-7B-0924
+  revision: 6d84c48581ece794365f2b8e9cfb043c68ade9c5
+  dtype: bfloat16
+  adapter: olmoe
+prompts:
+  source_run: experiments/phase1/cs-column-baseline-run1
+  num_prompts: 40
+  max_prompt_tokens: 128
+  decode_steps: 12
+index:
+  directory: packs/olmoe-1b-7b-0924-expert-index
+storage:
+  alignment: 4096
+  max_gap: 0
+  workers: 8
+  max_read_bytes: 1048576
+  max_extent_bytes: 8388608
+  slot_bytes: 33554432
+  slots: 2
+gpu_budget_bytes: 6000000000
+reference:
+  resident_layers:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  residency_check_prompts: 2
+  pin_host_experts: true
+configurations:
+- name: stream
+  cache_fraction: 0.0
+- name: lru-12
+  cache_fraction: 0.125
+  policy: lru
+- name: lru-25
+  cache_fraction: 0.25
+  policy: lru
+- name: hotness-25
+  cache_fraction: 0.25
+  policy: hotness
+- name: all-experts
+  all_experts: true
+  num_prompts: 3
+  decode_steps: 2
+hotness_half_life: 1024
+poison_prompts: 3
+record_ranges_prompts: 5
+timing:
+  settle_seconds: 3
+  warmup_prompts: 1
+gate:
+  max_decode_drive_fraction_without_cache: 0.15
+  max_decode_drive_ratio_to_all_experts: 0.2
+  max_decode_compact_fraction_of_layer: 0.2

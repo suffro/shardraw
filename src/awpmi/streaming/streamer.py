@@ -18,6 +18,17 @@ piece k. Only the requested rows' bytes are copied to the device: the rest of an
 block stays in host staging. The returned tensor holds the rows in ascending order, as
 raw bytes [n, row_bytes].
 
+With `out` (a caller's device buffer of rows), the rows are written there instead, row i
+of the request into row `positions[i]` (default i); the copy stream first waits for the
+work already queued on the caller's stream, which may still be reading that buffer. A
+piece whose runs land in separate places of the destination (a composed segment's spans,
+scattered positions) is gathered once and copied in one transfer per contiguous range.
+
+Runs of at least 256 KiB (an expert's tensors) are copied straight from pinned staging to
+their destination: gathering them first would copy every byte once more on the host, which
+cost a sixth of a streamed decode step in the Phase 4A profile (decision 0007). Smaller runs
+(one row of a weight, a refinement record) are gathered, so that a piece needs few transfers.
+
 Prefetch never materializes anything logically: a ticket's data is counted as consumed
 only when the ticket is used, and as wasted when it is dropped.
 """
@@ -34,6 +45,7 @@ from awpmi.storage.fileio import DIRECT_ALIGNMENT, aligned_host_buffer
 from awpmi.storage.store import FileBackedPageStore, InMemoryPageStore, PageStore, ReadPlan, check_rows, gather_runs
 
 DEFAULT_SLOT_BYTES = 8 << 20
+DIRECT_COPY_BYTES = 256 << 10  # runs at least this long skip the host gather
 
 
 @dataclass
@@ -79,6 +91,7 @@ class TransferStats:
 @dataclass(frozen=True)
 class _Piece:
     extents: torch.Tensor  # [k, 2] file offset, length (read back to back into a slot)
+    files: torch.Tensor  # [k] index of each extent's file in the plan's files
     parts: torch.Tensor  # [p, 3] staging offset, length, destination offset
 
 
@@ -153,10 +166,29 @@ class PageStreamer:
 
     # Synchronous path
 
-    def fetch(self, store: PageStore, segment: str, rows: torch.Tensor | None = None) -> torch.Tensor:
-        """Rows of `segment` on the device, ready for use on the current stream ([n, row_bytes] uint8)."""
+    def fetch(
+        self,
+        store: PageStore,
+        segment: str,
+        rows: torch.Tensor | None = None,
+        out: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Rows of `segment` on the device, ready for use on the current stream ([n, row_bytes] uint8).
+
+        With `out` (contiguous uint8 [m, row_bytes] on the device), request i is written to
+        out[positions[i]] (default i) and `out` is returned.
+        """
+        if out is not None:
+            info = store.segment(segment)
+            if out.dtype != torch.uint8 or out.dim() != 2 or out.shape[1] != info.row_bytes or not out.is_contiguous():
+                raise ValueError(f"out must be contiguous uint8 [rows, {info.row_bytes}]")
+            if resolve_device(out.device) != self.device:
+                raise ValueError("out must be on the streamer's device")
+        elif positions is not None:
+            raise ValueError("positions need an output buffer")
         with self._lock:
-            tensor, ready = self._transfer(store, segment, rows)
+            tensor, ready = self._transfer(store, segment, rows, out, positions)
         self._hand_over(tensor, ready)
         return tensor
 
@@ -166,25 +198,47 @@ class PageStreamer:
             current.wait_event(ready)
             tensor.record_stream(current)
 
-    def _transfer(self, store: PageStore, segment: str, rows: torch.Tensor | None):
+    def _transfer(
+        self, store: PageStore, segment: str, rows: torch.Tensor | None, out: torch.Tensor | None = None, positions=None
+    ):
         self.stats.fetches += 1
         if store.in_memory and resolve_device(store.device) == self.device:
-            return store.read_rows(segment, rows), None
+            return _place(store.read_rows(segment, rows), out, positions), None
         if isinstance(store, InMemoryPageStore) and store.device.type == "cpu":
-            return self._transfer_host_memory(store, segment, rows), self._record_ready()
+            data = self._transfer_host_memory(store, segment, rows)
+            return self._place_on_copy_stream(data, out, positions), self._record_ready()
         if not isinstance(store, FileBackedPageStore):
-            host = store.read_rows(segment, rows)
-            return self._copy_host_tensor(host), self._record_ready()
-        plan = store.plan(segment, rows)
+            data = self._copy_host_tensor(store.read_rows(segment, rows))
+            return self._place_on_copy_stream(data, out, positions), self._record_ready()
+        plan = store.plan(segment, rows, positions)
         store.count_plan(plan)
-        if self.cuda:
+        if out is not None:
+            if out.shape[0] < plan.output_rows:
+                raise ValueError(f"out has {out.shape[0]} rows, the request needs {plan.output_rows}")
+            dest = out.view(-1)
+            if self.cuda:
+                # The caller's stream may still be using this buffer (e.g. the previous layer's kernels).
+                self.copy_stream.wait_stream(torch.cuda.current_stream(self.device))
+                out.record_stream(self.copy_stream)
+        elif self.cuda:
             with torch.cuda.stream(self.copy_stream):
                 dest = torch.empty(plan.logical_bytes, dtype=torch.uint8, device=self.device)
         else:
             dest = torch.empty(plan.logical_bytes, dtype=torch.uint8)
         for piece in self._pieces(plan):
             self._move_piece(store, plan, piece, dest)
-        return dest.view(plan.row_count, plan.segment.row_bytes), self._record_ready()
+        result = out if out is not None else dest.view(plan.row_count, plan.segment.row_bytes)
+        return result, self._record_ready()
+
+    def _place_on_copy_stream(self, data: torch.Tensor, out: torch.Tensor | None, positions) -> torch.Tensor:
+        if out is None:
+            return data
+        if not self.cuda:
+            return _place(data, out, positions)
+        self.copy_stream.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(self.copy_stream):
+            _place(data, out, positions)
+        return out
 
     def _record_ready(self):
         if not self.cuda:
@@ -253,12 +307,12 @@ class PageStreamer:
     def _pieces(self, plan: ReadPlan) -> list[_Piece]:
         """Split a plan into slot-sized pieces: extents read back to back, and the parts of runs they hold."""
         limit = self.slot_bytes
-        extents, runs = plan.extents, plan.runs
+        extents, runs, files = plan.extents, plan.runs, plan.extent_files
         if extents.numel() == 0:
             return []
         solo = [False] * extents.shape[0]
         if bool((extents[:, 1] > limit).any()):
-            extents, runs, solo = _chunk_long_extents(extents, runs, limit)
+            extents, runs, files, solo = _chunk_long_extents(extents, runs, files, limit)
         lengths = extents[:, 1].tolist()
         piece_of_extent, position = [], []
         piece, used, closed = 0, 0, False
@@ -281,7 +335,11 @@ class PageStreamer:
         extent_split = torch.searchsorted(piece_of_extent, bounds).tolist()
         run_split = torch.searchsorted(piece_of_run, bounds).tolist()
         return [
-            _Piece(extents[extent_split[k] : extent_split[k + 1]], parts[run_split[k] : run_split[k + 1]])
+            _Piece(
+                extents[extent_split[k] : extent_split[k + 1]],
+                files[extent_split[k] : extent_split[k + 1]],
+                parts[run_split[k] : run_split[k + 1]],
+            )
             for k in range(count)
         ]
 
@@ -289,21 +347,41 @@ class PageStreamer:
         slot = self._slots[self._next_slot]
         self._next_slot = (self._next_slot + 1) % len(self._slots)
         slot.wait_free()
-        store.read_extents(plan, piece.extents, slot.staging)
+        store.read_extents(plan, piece.extents, slot.staging, piece.files)
         self.stats.pieces += 1
         parts = piece.parts
-        first, last = int(parts[0, 2]), int(parts[-1, 2] + parts[-1, 1])
-        total = last - first
+        if parts.shape[0] == 0:  # a chunk that lies in a merged gap (max_gap > 0): read, nothing to move
+            return
+        if parts.shape[0] > 1:
+            # Long runs go straight from staging; the rest is gathered below.
+            direct = parts[:, 1] >= DIRECT_COPY_BYTES
+            for source_offset, length, target in parts[direct].tolist():
+                self._move(dest[target : target + length], slot.staging[source_offset : source_offset + length], slot)
+            parts = parts[~direct]
+            if parts.shape[0] == 0:
+                return
+        lengths = parts[:, 1]
+        total = int(lengths.sum())
         if parts.shape[0] == 1:
             source = slot.staging[int(parts[0, 0]) : int(parts[0, 0]) + total]
         else:
-            gather_runs(slot.staging, parts[:, 0], parts[:, 1], slot.compact[:total], plan.segment.row_bytes)
+            gather_runs(slot.staging, parts[:, 0], lengths, slot.compact[:total], plan.segment.row_bytes)
             source = slot.compact[:total]
             self.stats.gathered_bytes += total
+        # One transfer per range of parts that are contiguous in the destination too.
+        targets = parts[:, 2]
+        breaks = (targets[1:] != targets[:-1] + lengths[:-1]).nonzero().squeeze(1) + 1
+        starts = [0, *breaks.tolist(), parts.shape[0]]
+        within = (torch.cumsum(lengths, 0) - lengths).tolist()
+        for a, b in zip(starts[:-1], starts[1:]):
+            first, size = int(targets[a]), int(lengths[a:b].sum())
+            self._move(dest[first : first + size], source[within[a] : within[a] + size], slot)
+
+    def _move(self, dest: torch.Tensor, source: torch.Tensor, slot: _Slot) -> None:
         if not self.cuda:
-            dest[first:last].copy_(source)
-            return
-        self._copy(dest[first:last], source, slot, asynchronous=True)
+            dest.copy_(source)
+        else:
+            self._copy(dest, source, slot, asynchronous=True)
 
     # Prefetch
 
@@ -330,31 +408,44 @@ class PageStreamer:
             self._prefetcher = None
 
 
-def _chunk_long_extents(extents: torch.Tensor, runs: torch.Tensor, limit: int):
+def _place(data: torch.Tensor, out: torch.Tensor | None, positions) -> torch.Tensor:
+    """Write rows `data` into out[positions] (default: the first rows of `out`); without `out`, `data` itself."""
+    if out is None:
+        return data
+    if positions is None:
+        out[: data.shape[0]].copy_(data)
+    else:
+        out.index_copy_(0, positions.reshape(-1).to(out.device, torch.int64), data)
+    return out
+
+
+def _chunk_long_extents(extents: torch.Tensor, runs: torch.Tensor, files: torch.Tensor, limit: int):
     """Split extents longer than `limit` into `limit`-sized chunks, and the runs they hold at chunk boundaries.
 
-    Returns the new extents and runs, and which extents are chunks (to be moved alone).
+    Returns the new extents, runs and extent files, and which extents are chunks (to be moved alone).
     """
-    new_extents, new_runs, solo = [], [], []
+    new_extents, new_runs, new_files, solo = [], [], [], []
     run_list = runs.tolist()
     index = 0
-    for extent_id, (offset, length) in enumerate(extents.tolist()):
+    for extent_id, ((offset, length), file) in enumerate(zip(extents.tolist(), files.tolist())):
         mine = []
         while index < len(run_list) and run_list[index][3] == extent_id:
             mine.append(run_list[index])
             index += 1
         if length <= limit:
             new_extents.append((offset, length))
+            new_files.append(file)
             solo.append(False)
             new_runs.extend((o, n, out, len(new_extents) - 1) for o, n, out, _ in mine)
             continue
         for chunk_start in range(offset, offset + length, limit):
             chunk_end = min(chunk_start + limit, offset + length)
             new_extents.append((chunk_start, chunk_end - chunk_start))
+            new_files.append(file)
             solo.append(True)
             for run_offset, run_length, run_out, _ in mine:
                 begin, end = max(run_offset, chunk_start), min(run_offset + run_length, chunk_end)
                 if begin < end:
                     new_runs.append((begin, end - begin, run_out + begin - run_offset, len(new_extents) - 1))
     as_tensor = lambda rows, width: torch.tensor(rows, dtype=torch.int64).reshape(-1, width)  # noqa: E731
-    return as_tensor(new_extents, 2), as_tensor(new_runs, 4), solo
+    return as_tensor(new_extents, 2), as_tensor(new_runs, 4), torch.tensor(new_files, dtype=torch.int64), solo

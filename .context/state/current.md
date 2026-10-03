@@ -2,96 +2,105 @@
 
 ## Current focus
 
-**Phase 3 (real selective materialization and a general storage substrate) is complete
-(2026-10-02). Gates A, B and C pass.** The full report is
-`history/2026-10-02-awpmi-phase3-report.md`; the decisions are in decision 0006.
+**Phase 4A (the first real out-of-VRAM mixture of experts) is complete (2026-10-03).
+Correctness and gates A, B, C and D pass.** The full report is
+`history/2026-10-03-awpmi-phase4a-report.md`; the decisions are in decision 0007.
 
-- **What was built** (decision 0006):
-  - a storage core that knows no model: `awpmi.storage`, `awpmi.streaming` and
-    `awpmi.materialization`;
-  - segments of rows in safetensors files, read plans aligned to 4 KiB, and positioned direct
-    reads with 8 threads;
-  - a pinned, double-buffered streamer with a copy stream and events, and prefetch tickets;
-  - a budgeted device page cache (LRU or hotness);
-  - packs with a hashed manifest that refer to published checkpoint tensors (`awpmi pack`);
-  - the Phase 1C store reading through it, its mathematics unchanged;
-  - a model-agnostic MoE adapter for transformers' experts modules.
-- **Correctness:**
-  - LM head: 0 mismatches. The drive-backed runtime is bit for bit the resident one on
-    6,000 runs per benchmark run, and the resident one reproduces the Phase 1C records field
-    by field.
-  - Every storage audit holds, and the OS's own read counters equal the store's.
-  - MoE: 3,275 of 3,275 streamed steps are bit for bit the resident Granite model's.
-  - Both benchmarks were run twice, with identical digests.
-- **LM head on the drive** (SmolLM2, masked fallback), per token, as fractions of the BF16 head:
+- **Answer to the phase's question: yes.** Shardraw runs OLMoE-1B-7B, whose 12.9 GB of experts
+  exceed this 8 GB GPU (and the 6 GB cap the streamed process runs under). Every step reproduces
+  the fully materialized reference bit for bit:
+  - tokens, logits and the whole KV cache;
+  - per layer, the router logits, routed experts, their weights, every (token, expert) output
+    and the experts output.
 
-  | | Logical | Read from the drive | Moved to the GPU |
-  | --- | --- | --- | --- |
-  | Phase 1C on the drive | 0.404 | **0.468** | 0.390 |
-  | Full BF16 head | 1.0 | 1.0 | 1.0 |
-  | Base level cached on the device | 0.404 | 0.090 | 0.011 |
+  That holds for 2,089 of 2,089 streamed steps per run, in two runs with different hash seeds.
+- **What was built** (decision 0007):
+  - a compact experts call: buffers for the routed experts only, in ascending expert order,
+    `num_experts` and `top_k_index` remapped for the call, parameters `None` between calls;
+  - composed segments: a row made of byte spans of several files, so a checkpoint that stores
+    each expert as separate tensors is read in place. The index is built from headers alone
+    (`awpmi pack expert-index`), its layout derived from transformers' conversion mapping;
+  - an expert-free loader (meta skeleton, direct reads, transformers' dtype plan);
+  - reference profiles (`awpmi.profiles`: BF16, FP16, native quantized declared only);
+  - `FullLayerOffload`, the reference for a model that does not fit: transformers' own model,
+    one experts layer materialized at a time;
+  - a CUDA memory pool for cache entries; direct copies of long runs; 32 MiB staging slots;
+  - the OLMoE adapter (layout check, routers, profile).
+- **Results** (run1, per decode token, as fractions of all expert bytes):
 
-  - Amplification is 1.20×, all of it from the 4 KiB blocks around the int4 refinement rows.
-  - Phase 1C's 4 KiB model had predicted 0.482 including resident metadata; measured, it is
-    0.468 + 0.014.
-  - Time is not a win yet: 43.3 ms against 22.2 ms for the full head from the drive. The eager
-    PyTorch runtime is still about 20 ms.
-- **MoE** (Granite 3.1 1B-A400M, 24 × 32 experts, top-8):
-  - device memory falls from 2.70 GB to 0.39 GB;
-  - a decode token reads 0.251 of the expert bytes without a cache (605 MB, 451 ms), 0.080–0.096
-    with a cache of half the experts, and 1.0 with dense streaming (1,074 ms);
-  - the experts are read from the published checkpoint, with nothing copied.
-- **Finding:** on NTFS, direct reads of a file with an active OS cache map are 4–6× slower.
-  Packs are verified with direct reads, and benchmarks never mix buffered and direct access to
-  one file.
+  | | No cache | LRU 1/8 | LRU 1/4 | Hotness 1/4 | Every expert |
+  | --- | --- | --- | --- | --- | --- |
+  | Read from the drive | 0.1251 | 0.0819 | 0.0672 | 0.0658 | 1.0006 |
+  | Cache hit rate | – | 0.345 | 0.463 | 0.475 | – |
+  | Peak GPU memory | 1.14 GB | 2.74 GB | 4.35 GB | 4.35 GB | 1.82 GB |
 
-Phases 1A, 1B, 1C and 2 are complete. Their reports are in `history/`.
+  - Compact buffers hold |R| × 12 MiB: 101 MB for a decode call, against Phase 3's 805 MB.
+  - Prefill routes 51.5 of 64 experts per layer, and needs up to one layer of buffers (805 MB).
+  - The streamed process loads 0.95 GB of non-expert weights in 1.2 s and peaks at 2.7 GB of
+    host memory; the reference needs 15.1 GB.
+  - Time (no digests): a decode step takes 759 ms without a cache and 525 ms with LRU at 1/4. The drive is the first bottleneck, at 94% of its
+    sequential rate; then Python and kernel launches, then the transfer path's per-request
+    overhead.
+- **Findings:**
+  - `meta` weights give CUDA garbage, not errors;
+  - cache pages fragment the allocator under a cap (fixed by a separate pool);
+  - transformers' dtype plans must be replicated by any loader that bypasses `from_pretrained`;
+  - OLMoE's `0125` base checkpoint is stored in FP32.
+
+Phases 1A, 1B, 1C, 2 and 3 are complete. Their reports are in `history/`.
 
 ## Recent relevant changes
 
-- New packages:
-  - `src/awpmi/storage/` (`layout`, `fileio`, `store`, `cache`, `pack`);
-  - `src/awpmi/streaming/streamer.py`;
-  - `src/awpmi/materialization/` (`backend`, `weights`).
-- New modules: `src/awpmi/models/moe.py` and `src/awpmi/cli.py`. `pyproject.toml` gains the
-  `awpmi` script; `uv.lock` is unchanged.
+- New modules:
+  - `src/awpmi/profiles.py`;
+  - `src/awpmi/models/checkpoint.py`;
+  - `src/awpmi/models/olmoe.py`.
 - Changed modules:
-  - `stores/refinement.py`: reads through a `MaterializationBackend`; `from_pack`,
-    `write_refinement_pack`; level records hold the payload and then the scale.
-  - `refinement_head.py`: `*:read` timer stages, for timing only.
+  - `storage/layout.py` (`ComposedSegment`, `byte_runs`);
+  - `storage/store.py` (multi-file plans with output offsets and `positions`);
+  - `storage/pack.py` (manifest v2, publisher sha256, direct-read hashing);
+  - `streaming/streamer.py` (`out`/`positions`, direct copies);
+  - `materialization/backend.py` (`out=`, hits first, cache memory pool);
+  - `materialization/weights.py` (`assemble`);
+  - `models/moe.py` (compact mode, `FullLayerOffload`, `ExpertCall`);
+  - `cli.py` (`pack expert-index`).
+- Phase 3 regression check (its first prompts rerun against the committed run1 records):
+  - Granite: 249 of 249 records identical.
+  - LM head: 159 of 160. The other one differs only in the transfer counters
+    (`gathered_bytes`, `h2d_copies`), the effect of direct copies.
 - Benchmarks:
-  - `benchmarks/storage_runtime.py`, `storage_report.py`, `moe_runtime.py` and `moe_report.py`;
-  - `configs/phase3-storage.yaml` and `configs/phase3-moe.yaml`, with gates fixed before the
-    runs;
-  - raw results in `experiments/phase3/{storage,moe}-run{1,2}`;
-  - packs under `packs/` (gitignored, rebuilt by `awpmi pack`).
-- Decision 0006 is new. Decision 0004 points to it.
-- 399 tests, 76 of them new: storage, streaming, refinement on storage, MoE (7 architectures),
-  layering, hotness determinism across hash seeds.
+  - `benchmarks/olmoe_runtime.py`, `olmoe_profile.py` and `olmoe_report.py`;
+  - `configs/phase4a-olmoe.yaml`, with gates fixed before the runs;
+  - raw results in `experiments/phase4a/olmoe-run{1,2}`;
+  - the expert index under `packs/` (gitignored).
+- Decision 0007 is new.
+- 452 tests, 53 of them new: composed storage, compact calls (7 architectures, CPU and CUDA,
+  caches, hash seeds, sabotage), split checkpoints of 5 architectures, the expert-free loader,
+  the offload reference, the OLMoE adapter.
 
 ## Next
 
-Phase 4 or the DeepSeek-class path is **not started**. It needs the user's go-ahead.
+The next phase is **not started**. It needs the user's go-ahead.
 
-1. **Recommended next step (report §10):** a MoE whose experts exceed GPU memory with the same
-   code: OLMoE-1B-7B-0125, with only non-expert weights loaded and dense streaming as the
-   reference. That needs:
-   - a compact expert call: slot buffers for the routed experts only, `top_k_index` remapped,
-     exactness re-verified;
-   - zero-copy packs for checkpoints that split gate and up.
-
-   Then DeepSeek-V2-Lite or Moonlight-16B (DeepSeek architecture, more than this GPU, close to
-   the RAM).
+1. **Recommended next model: `moonshotai/Moonlight-16B-A3B`** (report §13).
+   - It is DeepSeek-V3's architecture at 1/40 of the size: MLA, 64 + 2 experts, top-6, sigmoid
+     `noaux_tc` router; 28.8 GB of BF16 experts, MIT license.
+   - It forces what DeepSeek-V3 will need, at a checkable size:
+     - a reference that does not fit in host memory, streamed per layer through an independent
+       reader;
+     - bounded prefill buffers: an experts call split over groups of experts, with an exact
+       replica of the implementation's combine. That also enables ds4's compute-level hits
+       first.
+   - DeepSeek-V2-Lite is subsumed (same sizes, older router).
 2. **Open decisions for the user:**
-   - Certify against a quantized reference? DeepSeek-V3 ships FP8 experts, and DwarfStar runs
-     2-bit ones. That would revise decision 0001's BF16 reference.
-   - Still open from Phase 2: RN-even for elementwise kernels, and Phase 2 on a larger model.
-3. **Open levers:**
-   - fused kernels, now justified by the profile (Phase 4);
-   - native read submission (`io_uring`/`IoRing` or a small extension) and per-layer batching;
-   - 512-byte reads or row clustering for the int4 level (0.078 of the head of amplification);
-   - a prefetch predictor better than the previous step (which would waste half);
-   - a cache admission freeze during long prefills.
+   - the reference for FP8 experts (DeepSeek-V3). `NATIVE_QUANTIZED_REFERENCE` is declared and
+     refused for now;
+   - still open from Phase 2: RN-even for elementwise kernels, and Phase 2 on a larger model.
+3. **Open levers** (profile, report §9):
+   - native read submission and overlap across layers;
+   - fewer, larger reads per layer (one plan per expert for all its tensors);
+   - an admission freeze during prefill;
+   - fused kernels for the launch-bound transformer.
 
 ## Blockers
 

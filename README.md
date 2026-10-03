@@ -45,6 +45,13 @@ straight from the published checkpoint. The same backend serves the experts of a
 mixture-of-experts model (Granite 3.1 1B-A400M; seven architectures in tests) bit for bit,
 with only the routed experts read from the drive.
 
+**Phase 4A — a mixture of experts larger than the GPU** runs OLMoE-1B-7B (12.9 GB of experts)
+on an 8 GB GPU under a 6 GB memory cap. Its experts are read in place from the published
+checkpoint, which stores each expert as separate tensors, through an index built from file
+headers alone. A compact experts call holds only the routed experts on the GPU. Every step
+reproduces the fully materialized reference bit for bit: tokens, logits, routing, every expert
+output and the KV cache.
+
 ## Setup
 
 ```bash
@@ -72,6 +79,10 @@ uv run python benchmarks/storage_runtime.py --output experiments/phase3/my-run [
 uv run python benchmarks/storage_report.py experiments/phase3/my-run [--compare experiments/phase3/other-run]
 uv run python benchmarks/moe_runtime.py --output experiments/phase3/my-moe-run [--num-prompts 5]
 uv run python benchmarks/moe_report.py experiments/phase3/my-moe-run [--compare experiments/phase3/other-moe-run]
+uv run awpmi pack expert-index                                  # Phase 4A: OLMoE's expert index (headers only)
+uv run python benchmarks/olmoe_runtime.py --output experiments/phase4a/my-run [--num-prompts 2]
+uv run python benchmarks/olmoe_profile.py --output experiments/phase4a/my-run/profile.json
+uv run python benchmarks/olmoe_report.py experiments/phase4a/my-run [--compare experiments/phase4a/other-run]
 ```
 
 `run.py` writes raw per-input records, validation records, the prompts, the
@@ -95,7 +106,12 @@ host memory, resident, on the drive and with a cached base level, audits every b
 `storage_report.py` evaluates gates A and B (`configs/phase3-storage.yaml`). `moe_runtime.py`
 serves a MoE model's experts from the drive under several cache budgets and policies, compares
 every decoding step with the resident model bit for bit, and `moe_report.py` evaluates gate C
-(`configs/phase3-moe.yaml`).
+(`configs/phase3-moe.yaml`). `awpmi pack expert-index` indexes a checkpoint whose experts are
+split into several tensors without copying them. `olmoe_runtime.py` runs the out-of-VRAM
+benchmark in two processes: the fully materialized reference, then the streamed model under a
+device-memory cap, compared with it in every recorded digest. `olmoe_profile.py` times the
+streamed steps without those digests, and `olmoe_report.py` evaluates correctness and gates A–D
+(`configs/phase4a-olmoe.yaml`).
 
 ## Layout
 
@@ -104,17 +120,20 @@ src/awpmi/      reference, paging, bounds, state, certificate, schedulers, execu
                 decomposition (Phase 1B, packing), oracle (Phase 1B simulator),
                 stores (Phase 1C packed store, Phase 2 MLP store), refinement_head (Phase 1C runtime),
                 bounds/{rounding,enclosure,operators,pairwise} and suffix_runtime (Phase 2),
-                storage, streaming, materialization, models/moe and cli (Phase 3)
+                storage, streaming, materialization, models/moe and cli (Phase 3),
+                profiles, models/checkpoint and models/olmoe (Phase 4A)
 tests/          bound soundness, pages, certificate and ties, reference parity, fallback parity,
                 decomposition exactness, refinement oracle, packing, coarse bounds, runtime,
                 rounding models, operator bounds, enclosure LM head, adaptive suffix,
-                storage (no hidden reads), streaming and caches, runtime on storage, MoE experts, layering
+                storage (no hidden reads), streaming and caches, runtime on storage, MoE experts, layering,
+                composed segments and compact expert calls (Phase 4A)
 benchmarks/     run.py, report.py, prompts.py, oracle.py, refinement_oracle.py, refinement_report.py,
                 refinement_runtime.py, refinement_runtime_report.py, fallback_study.py,
                 suffix_runtime.py, suffix_report.py, storage_runtime.py, storage_report.py,
-                moe_runtime.py, moe_report.py
+                moe_runtime.py, moe_report.py, olmoe_runtime.py, olmoe_profile.py, olmoe_report.py
 configs/        smollm2-135m.yaml (pinned model and dataset revisions), phase1b-refinement.yaml,
-                phase1c-runtime.yaml, phase2-suffix.yaml, phase3-storage.yaml, phase3-moe.yaml
+                phase1c-runtime.yaml, phase2-suffix.yaml, phase3-storage.yaml, phase3-moe.yaml,
+                phase4a-olmoe.yaml
 experiments/    raw results per phase and run
-packs/          Phase 3 packs (gitignored; rebuilt by `awpmi pack`)
+packs/          packs and expert indexes (gitignored; rebuilt by `awpmi pack`)
 ```

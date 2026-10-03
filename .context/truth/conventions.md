@@ -46,6 +46,14 @@
 - Phase 3 MoE benchmark: `python -m uv run python benchmarks/moe_runtime.py --output experiments/phase3/<name>`
   (config `configs/phase3-moe.yaml`), then
   `python -m uv run python benchmarks/moe_report.py <run> --compare <second run>`.
+- Phase 4A out-of-VRAM MoE: `python -m uv run awpmi pack expert-index` (the OLMoE expert index,
+  from headers only; needs the checkpoint in the Hugging Face cache and the Hub's file
+  digests), then `PYTHONHASHSEED=<n> python -m uv run python benchmarks/olmoe_runtime.py --output experiments/phase4a/<name>`
+  (config `configs/phase4a-olmoe.yaml`; it starts the reference and the stream stage in
+  processes of their own), `python -m uv run python benchmarks/olmoe_profile.py --output <run>/profile.json`
+  (un-instrumented timing), and
+  `python -m uv run python benchmarks/olmoe_report.py <run> --compare <second run>`. The two runs
+  of a pair use different `PYTHONHASHSEED` values.
 - Timing fields (`timings_ms`, `reference_ms`, `wall_ms`, `system`, `profile.json`) are recorded but
   excluded from digests. Runs that are compared for reproducibility must use the same source
   tree (`src`, `benchmarks`, `configs`; tests are not part of it).
@@ -91,3 +99,15 @@
   the OS close cached handles (a few seconds) after loading a model from the same file.
 - A new storage or transfer path needs the no-hidden-reads property tested: every positioned
   read lies in a planned extent, and bytes outside the requested rows never reach the output.
+- "Exact" is relative to a declared reference profile (`awpmi.profiles`, decision 0007): the
+  stored weight dtype, compute dtype and kernels are checked against the model, and streamed
+  weights are never converted on the fly.
+- A reference too large for the device runs in its own process, loaded by transformers as
+  published, each experts layer materialized whole in turn (`FullLayerOffload`); some prompts
+  run with different residency and must agree. Its weights must not come through Shardraw's
+  own I/O path; the index Shardraw streams from is audited against them row by row.
+- Compact expert buffers keep ascending expert order (the eager implementation accumulates in
+  loop order), and expert parameters are `None` between calls, never `meta` (a CUDA grouped
+  GEMM given a meta weight returned garbage instead of failing).
+- A checkpoint index records the publisher's file digests and is built from headers only;
+  nothing proportional to the model is read or written to make it.

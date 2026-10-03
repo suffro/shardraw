@@ -1,0 +1,67 @@
+{
+  "gpu_total_bytes": 8585084928,
+  "gpu_budget_bytes": 6000000000,
+  "timings_ms": {
+    "load": 1183.883500052616,
+    "stream": 524734.5328000374,
+    "lru-12": 438853.54140005074,
+    "lru-25": 399890.63489995897,
+    "hotness-25": 412914.8870999925,
+    "all-experts": 42973.097500158474,
+    "configurations": 1819997.1030000597
+  },
+  "configurations": {
+    "stream": {
+      "cache_capacity_bytes": 0,
+      "device_bytes_at_start": 986977280,
+      "host_bytes": 134217728,
+      "peak_cache_resident_bytes": null
+    },
+    "lru-12": {
+      "cache_capacity_bytes": 1610612736,
+      "device_bytes_at_start": 986977280,
+      "host_bytes": 134217728,
+      "peak_cache_resident_bytes": 1610612736
+    },
+    "lru-25": {
+      "cache_capacity_bytes": 3221225472,
+      "device_bytes_at_start": 2597590016,
+      "host_bytes": 134217728,
+      "peak_cache_resident_bytes": 3221225472
+    },
+    "hotness-25": {
+      "cache_capacity_bytes": 3221225472,
+      "device_bytes_at_start": 4204008448,
+      "host_bytes": 134217728,
+      "peak_cache_resident_bytes": 3221225472
+    },
+    "all-experts": {
+      "cache_capacity_bytes": 0,
+      "device_bytes_at_start": 4208202752,
+      "host_bytes": 134217728,
+      "peak_cache_resident_bytes": null
+    }
+  },
+  "load": {
+    "loaded_bytes": 953421824,
+    "tensors": 147
+  },
+  "non_expert_device_bytes": 953422848,
+  "memory_after_load": {
+    "resident_bytes": 1219174400,
+    "peak_resident_bytes": 1219174400,
+    "private_bytes": 3070447616
+  },
+  "memory_peak": {
+    "resident_bytes": 2329042944,
+    "peak_resident_bytes": 2741297152,
+    "private_bytes": 8825032704
+  },
+  "expert_bytes_total": 12884901888,
+  "layer_bytes": 805306368,
+  "expert_row_bytes": [
+    12582912
+  ],
+  "experts_implementation": "grouped_mm",
+  "attention_implementation": "sdpa"
+}
